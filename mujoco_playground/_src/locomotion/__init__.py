@@ -41,6 +41,7 @@ from mujoco_playground._src.locomotion.spot import joystick_gait_tracking as spo
 from mujoco_playground._src.locomotion.t1 import joystick as t1_joystick
 from mujoco_playground._src.locomotion.t1 import randomize as t1_randomize
 from mujoco_playground._src.locomotion.rick import joystick as rick_joystick
+from mujoco_playground._src.locomotion.rick import joystick_simple as rick_joystick_simple
 
 
 _envs = {
@@ -88,6 +89,9 @@ _envs = {
     "RickJoystickFlatTerrain": functools.partial(
         rick_joystick.Joystick, task="flat_terrain"
     ),
+    "RickJoystickSimpleFlatTerrain": functools.partial(
+        rick_joystick_simple.Joystick, task="flat_terrain"
+    ),
 }
 
 _cfgs = {
@@ -115,6 +119,7 @@ _cfgs = {
     "T1JoystickFlatTerrain": t1_joystick.default_config,
     "T1JoystickRoughTerrain": t1_joystick.default_config,
     "RickJoystickFlatTerrain": rick_joystick.default_config,
+    "RickJoystickSimpleFlatTerrain": rick_joystick_simple.default_config,
 }
 
 _randomizer = {
