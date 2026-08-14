@@ -22,6 +22,7 @@ def default_config() -> config_dict.ConfigDict:
         'healthy_z_range': (0.05, 0.2),
         'episode_length': 1000,
         'action_repeat': 1,
+        'impl': 'brax',
     })
 
 class Joystick(mjx_env.MjxEnv):

@@ -25,6 +25,7 @@ def default_config() -> config_dict.ConfigDict:
         'obs_noise_scale': 0.06,
         'episode_length': 1000,
         'action_repeat': 1,
+        'impl': 'brax',
     })
 
 class Joystick(mjx_env.MjxEnv):

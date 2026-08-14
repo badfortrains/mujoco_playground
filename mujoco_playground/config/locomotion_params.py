@@ -156,6 +156,8 @@ def brax_ppo_config(
       "SpotFlatTerrainJoystick",
       "SpotGetup",
       "SpotJoystickGaitTracking",
+      "RickJoystickFlatTerrain",
+      "RickJoystickSimpleFlatTerrain",
   ):
     pass  # use default config
   else:
