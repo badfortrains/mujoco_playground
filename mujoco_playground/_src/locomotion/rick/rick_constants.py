@@ -15,6 +15,12 @@ def ensure_rick_assets():
             ["git", "clone", "https://github.com/badfortrains/rick_v2.git", str(rick_v2_dir)],
             check=True,
         )
+    else:
+        print(f"Updating rick_v2 repository in {rick_v2_dir}...")
+        subprocess.run(
+            ["git", "-C", str(rick_v2_dir), "pull"],
+            check=True,
+        )
 
 def task_to_xml(task_name: str) -> epath.Path:
     ensure_rick_assets()
