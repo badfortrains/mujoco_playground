@@ -39,7 +39,8 @@ def default_config() -> config_dict.ConfigDict:
         # Rewards
         # -------------------------------------------------------------
 
-        # Main task: match [vx, vy] = [0, -target_velocity].
+        # Main task: match forward speed.  Lateral motion is penalized
+        # separately so the torso can sway while transferring support.
         'velocity_tracking_weight': 2.0,
 
         # Width of exponential velocity tracking reward.
@@ -50,6 +51,11 @@ def default_config() -> config_dict.ConfigDict:
         # standing reward ~= exp(-0.0036 / 0.0025) ~= 0.24
         # instead of ~0.70 in your old setup.
         'tracking_sigma': 0.0025,
+
+        # Mild lateral-velocity regularization.  This is normalized by
+        # tracking_sigma below and is deliberately much softer than putting
+        # lateral velocity inside the exponential tracking reward.
+        'sideways_velocity_cost_weight': 0.05,
 
         # Explicitly discourage turning.
         'yaw_rate_cost_weight': 0.20,
@@ -69,6 +75,29 @@ def default_config() -> config_dict.ConfigDict:
 
         # Optional small vertical-motion penalty.
         'vertical_velocity_cost_weight': 0.05,
+
+        # -------------------------------------------------------------
+        # Gait shaping
+        # -------------------------------------------------------------
+
+        # Track alternating left/right swing-foot height targets.  The
+        # targets have a 50% duty cycle and are 180 degrees out of phase.
+        'foot_phase_reward_weight': 1.0,
+        'swing_foot_height': 0.012,  # 12 mm for this 145 mm-tall robot.
+        'foot_height_tracking_sigma': 2.5e-5,  # (5 mm)^2.
+
+        # Penalize planar motion of the foot whose phase says it should be
+        # supporting the robot.  This directly attacks the shuffling local
+        # optimum.  Units are inverse (m/s)^2.
+        'foot_slip_cost_weight': 20.0,
+
+        # Discourage a permanently crouched solution while leaving room for
+        # normal vertical COM motion during a step.
+        'base_height_cost_weight': 0.10,
+        'base_height_tracking_sigma': 4.0e-4,  # (20 mm)^2.
+
+        # Light mechanical-power penalty to suppress high-frequency motion.
+        'energy_cost_weight': 0.005,
 
         # -------------------------------------------------------------
         # Termination
@@ -121,6 +150,10 @@ class Joystick(mjx_env.MjxEnv):
         )
         self._tracking_sigma = config.tracking_sigma
 
+        self._sideways_velocity_cost_weight = (
+            config.sideways_velocity_cost_weight
+        )
+
         self._yaw_rate_cost_weight = (
             config.yaw_rate_cost_weight
         )
@@ -136,6 +169,20 @@ class Joystick(mjx_env.MjxEnv):
         self._vertical_velocity_cost_weight = (
             config.vertical_velocity_cost_weight
         )
+
+        self._foot_phase_reward_weight = (
+            config.foot_phase_reward_weight
+        )
+        self._swing_foot_height = config.swing_foot_height
+        self._foot_height_tracking_sigma = (
+            config.foot_height_tracking_sigma
+        )
+        self._foot_slip_cost_weight = config.foot_slip_cost_weight
+        self._base_height_cost_weight = config.base_height_cost_weight
+        self._base_height_tracking_sigma = (
+            config.base_height_tracking_sigma
+        )
+        self._energy_cost_weight = config.energy_cost_weight
 
         self._healthy_reward = config.healthy_reward
         self._terminate_when_unhealthy = (
@@ -159,6 +206,19 @@ class Joystick(mjx_env.MjxEnv):
             'body',
         )
 
+        self._feet_site_ids = jp.array([
+            mujoco.mj_name2id(
+                self._mj_model,
+                mujoco.mjtObj.mjOBJ_SITE.value,
+                'left_foot_center',
+            ),
+            mujoco.mj_name2id(
+                self._mj_model,
+                mujoco.mjtObj.mjOBJ_SITE.value,
+                'right_foot_center',
+            ),
+        ])
+
         # qpos layout with a free joint:
         #
         #   0:3   root position
@@ -167,6 +227,7 @@ class Joystick(mjx_env.MjxEnv):
         #
         # Start all policies around the XML's nominal joint pose.
         self._default_pose = self._mjx_model.qpos0[7:]
+        self._nominal_base_height = self._mjx_model.qpos0[2]
 
         # Position-actuator control limits.
         self._ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
@@ -205,7 +266,15 @@ class Joystick(mjx_env.MjxEnv):
     # ------------------------------------------------------------------
 
     def reset(self, rng: jp.ndarray) -> mjx_env.State:
-        rng, step_key = jax.random.split(rng)
+        _, phase_key, step_key = jax.random.split(rng, 3)
+
+        # A random starting phase prevents the policy from depending on a
+        # reset-only transient.  The two feet are offset by pi below.
+        phase = jax.random.uniform(
+            phase_key,
+            minval=-jp.pi,
+            maxval=jp.pi,
+        )
 
         qpos = self._mjx_model.qpos0
 
@@ -229,19 +298,25 @@ class Joystick(mjx_env.MjxEnv):
         obs = self._get_obs(
             data=data,
             last_action=last_action,
+            phase=phase,
         )
 
         zero = jp.array(0.0)
 
         metrics = {
             'reward_velocity_tracking': zero,
+            'reward_foot_phase': zero,
             'reward_alive': zero,
 
+            'cost_sideways_velocity': zero,
             'cost_yaw_rate': zero,
             'cost_heading': zero,
             'cost_orientation': zero,
             'cost_action_rate': zero,
             'cost_vertical_velocity': zero,
+            'cost_foot_slip': zero,
+            'cost_base_height': zero,
+            'cost_energy': zero,
 
             'x_position': zero,
             'y_position': zero,
@@ -255,6 +330,11 @@ class Joystick(mjx_env.MjxEnv):
             'yaw_rate': zero,
             'heading_alignment': zero,
             'uprightness': zero,
+
+            'left_foot_height': zero,
+            'right_foot_height': zero,
+            'desired_left_foot_height': zero,
+            'desired_right_foot_height': zero,
         }
 
         return mjx_env.State(
@@ -265,6 +345,7 @@ class Joystick(mjx_env.MjxEnv):
             metrics=metrics,
             info={
                 'last_action': last_action,
+                'phase': phase,
                 'rng': step_key,
             },
         )
@@ -279,8 +360,7 @@ class Joystick(mjx_env.MjxEnv):
         action: jp.ndarray,
     ) -> mjx_env.State:
 
-        rng = state.info['rng']
-        rng, step_key = jax.random.split(rng)
+        _, step_key = jax.random.split(state.info['rng'])
 
         # -------------------------------------------------------------
         # 1. Action processing
@@ -324,6 +404,14 @@ class Joystick(mjx_env.MjxEnv):
             self.n_substeps,
         )
 
+        # Advance the gait phase once per control step.  The action was
+        # selected from the previous phase and is evaluated at the phase of
+        # the resulting state.
+        phase = self._wrap_phase(
+            state.info['phase']
+            + 2.0 * jp.pi * self._step_frequency * self.dt
+        )
+
         # -------------------------------------------------------------
         # 3. Root orientation
         # -------------------------------------------------------------
@@ -361,39 +449,79 @@ class Joystick(mjx_env.MjxEnv):
             com_after - com_before
         ) / self.dt
 
-        velocity_xy_world = velocity_world[:2]
+        forward_velocity = -velocity_world[1]
+        sideways_velocity = velocity_world[0]
 
-        # The ONLY desired translational velocity:
-        #
-        # X = 0
-        # Y = -target_velocity
-        target_velocity_xy = jp.array([
-            0.0,
-            -self._target_velocity,
-        ])
-
-        velocity_error_xy = (
-            velocity_xy_world - target_velocity_xy
-        )
-
-        velocity_error_squared = jp.sum(
-            jp.square(velocity_error_xy)
+        # Track only the commanded forward component here.  Penalizing
+        # instantaneous lateral COM velocity inside this sharp exponential
+        # suppresses the weight transfer needed to lift a foot.
+        forward_velocity_error_squared = jp.square(
+            forward_velocity - self._target_velocity
         )
 
         velocity_tracking_reward = (
             self._velocity_tracking_weight
             * jp.exp(
-                -velocity_error_squared
+                -forward_velocity_error_squared
                 / self._tracking_sigma
             )
         )
 
-        # Convenient metrics.
-        forward_velocity = -velocity_world[1]
-        sideways_velocity = velocity_world[0]
+        sideways_velocity_cost = (
+            self._sideways_velocity_cost_weight
+            * jp.square(sideways_velocity)
+            / self._tracking_sigma
+        )
 
         # -------------------------------------------------------------
-        # 5. Angular velocity / yaw
+        # 5. Alternating foot trajectory and stance-foot slip
+        # -------------------------------------------------------------
+
+        desired_foot_heights = self._desired_foot_heights(phase)
+
+        foot_positions_before = data0.site_xpos[self._feet_site_ids]
+        foot_positions_after = data.site_xpos[self._feet_site_ids]
+
+        # The sites sit at the soles.  Clamp tiny contact penetration to zero
+        # before comparing against a clearance above the floor.
+        foot_heights = jp.maximum(foot_positions_after[:, 2], 0.0)
+
+        foot_height_error = jp.mean(
+            jp.square(foot_heights - desired_foot_heights)
+        )
+
+        foot_phase_reward = (
+            self._foot_phase_reward_weight
+            * jp.exp(
+                -foot_height_error
+                / self._foot_height_tracking_sigma
+            )
+        )
+
+        foot_velocities_world = (
+            foot_positions_after - foot_positions_before
+        ) / self.dt
+
+        # Do not penalize deliberate fore-aft motion of the swing foot.
+        # The height schedule is exactly zero throughout the other foot's
+        # stance half-cycle.
+        stance_weights = (
+            desired_foot_heights <= 1e-6
+        ).astype(foot_heights.dtype)
+
+        foot_slip_cost = (
+            self._foot_slip_cost_weight
+            * jp.sum(
+                stance_weights
+                * jp.sum(
+                    jp.square(foot_velocities_world[:, :2]),
+                    axis=1,
+                )
+            )
+        )
+
+        # -------------------------------------------------------------
+        # 6. Angular velocity / yaw
         # -------------------------------------------------------------
 
         # For a free joint:
@@ -419,7 +547,7 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         # -------------------------------------------------------------
-        # 6. Absolute heading
+        # 7. Absolute heading
         # -------------------------------------------------------------
 
         # The robot's local forward vector is -Y.
@@ -462,7 +590,7 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         # -------------------------------------------------------------
-        # 7. Upright orientation
+        # 8. Upright orientation, height, and energy
         # -------------------------------------------------------------
 
         # gravity_local[:2] is zero when perfectly upright.
@@ -477,12 +605,26 @@ class Joystick(mjx_env.MjxEnv):
             * jp.square(velocity_world[2])
         )
 
+        root_z = data.qpos[2]
+
+        base_height_cost = (
+            self._base_height_cost_weight
+            * jp.square(root_z - self._nominal_base_height)
+            / self._base_height_tracking_sigma
+        )
+
+        energy_cost = (
+            self._energy_cost_weight
+            * jp.sum(
+                jp.abs(data.actuator_force * data.qvel[6:])
+            )
+        )
+
         # -------------------------------------------------------------
-        # 8. Health / termination
+        # 9. Health / termination
         # -------------------------------------------------------------
 
         min_z, max_z = self._healthy_z_range
-        root_z = data.qpos[2]
 
         healthy_height = (
             (root_z >= min_z)
@@ -511,42 +653,53 @@ class Joystick(mjx_env.MjxEnv):
             done = jp.array(0.0)
 
         # -------------------------------------------------------------
-        # 9. Total reward
+        # 10. Total reward
         # -------------------------------------------------------------
 
         reward = (
             velocity_tracking_reward
+            + foot_phase_reward
             + healthy_reward
 
+            - sideways_velocity_cost
             - yaw_rate_cost
             - heading_cost
             - tilt_cost
             - action_rate_cost
             - vertical_velocity_cost
+            - foot_slip_cost
+            - base_height_cost
+            - energy_cost
         )
 
         # -------------------------------------------------------------
-        # 10. Observation
+        # 11. Observation
         # -------------------------------------------------------------
 
         obs = self._get_obs(
             data=data,
             last_action=action,
+            phase=phase,
         )
 
         # -------------------------------------------------------------
-        # 11. Debugging metrics
+        # 12. Debugging metrics
         # -------------------------------------------------------------
 
         state.metrics.update(
             reward_velocity_tracking=velocity_tracking_reward,
+            reward_foot_phase=foot_phase_reward,
             reward_alive=healthy_reward,
 
+            cost_sideways_velocity=-sideways_velocity_cost,
             cost_yaw_rate=-yaw_rate_cost,
             cost_heading=-heading_cost,
             cost_orientation=-tilt_cost,
             cost_action_rate=-action_rate_cost,
             cost_vertical_velocity=-vertical_velocity_cost,
+            cost_foot_slip=-foot_slip_cost,
+            cost_base_height=-base_height_cost,
+            cost_energy=-energy_cost,
 
             x_position=data.qpos[0],
             y_position=data.qpos[1],
@@ -561,6 +714,11 @@ class Joystick(mjx_env.MjxEnv):
             yaw_rate=yaw_rate,
             heading_alignment=heading_alignment,
             uprightness=uprightness,
+
+            left_foot_height=foot_heights[0],
+            right_foot_height=foot_heights[1],
+            desired_left_foot_height=desired_foot_heights[0],
+            desired_right_foot_height=desired_foot_heights[1],
         )
 
         return state.replace(
@@ -571,6 +729,7 @@ class Joystick(mjx_env.MjxEnv):
             info={
                 **state.info,
                 'last_action': action,
+                'phase': phase,
                 'rng': step_key,
             },
         )
@@ -583,6 +742,7 @@ class Joystick(mjx_env.MjxEnv):
         self,
         data: mjx.Data,
         last_action: jp.ndarray,
+        phase: jp.ndarray,
     ) -> jp.ndarray:
 
         # -------------------------------------------------------------
@@ -654,13 +814,6 @@ class Joystick(mjx_env.MjxEnv):
         # Periodic clock
         # -------------------------------------------------------------
 
-        phase = (
-            2.0
-            * jp.pi
-            * self._step_frequency
-            * data.time
-        )
-
         clock = jp.array([
             jp.sin(phase),
             jp.cos(phase),
@@ -705,3 +858,22 @@ class Joystick(mjx_env.MjxEnv):
         ])
 
         return jp.clip(obs, -10.0, 10.0)
+
+    # ------------------------------------------------------------------
+    # Gait helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wrap_phase(phase: jp.ndarray) -> jp.ndarray:
+        return jp.mod(phase + jp.pi, 2.0 * jp.pi) - jp.pi
+
+    def _desired_foot_heights(
+        self,
+        phase: jp.ndarray,
+    ) -> jp.ndarray:
+        # Left and right swing phases are exactly half a cycle apart.  The
+        # positive half of sin is swing; the other half is stance.  Squaring
+        # it gives zero slope at lift-off and touchdown.
+        foot_phases = phase + jp.array([0.0, jp.pi])
+        swing = jp.maximum(jp.sin(foot_phases), 0.0)
+        return self._swing_foot_height * jp.square(swing)
