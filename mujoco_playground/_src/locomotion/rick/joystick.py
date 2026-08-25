@@ -168,7 +168,11 @@ class Joystick(mjx_env.MjxEnv):
         ])
 
         self._default_pose = self._mjx_model.qpos0[7:]
-        self._nominal_base_height = self._mjx_model.qpos0[2]
+        default_data = mujoco.MjData(self._mj_model)
+        mujoco.mj_forward(self._mj_model, default_data)
+        self._nominal_base_height = default_data.subtree_com[
+            self._body_idx, 2
+        ]
         self._ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
         self._ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
 
@@ -453,10 +457,10 @@ class Joystick(mjx_env.MjxEnv):
             self._vertical_velocity_cost_weight
             * jp.square(velocity_world[2])
         )
-        root_z = data.qpos[2]
+        base_height = data.subtree_com[self._body_idx, 2]
         base_height_cost = (
             self._base_height_cost_weight
-            * jp.square(root_z - self._nominal_base_height)
+            * jp.square(base_height - self._nominal_base_height)
             / self._base_height_tracking_sigma
         )
         energy_cost = (
@@ -465,7 +469,7 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         min_z, max_z = self._healthy_z_range
-        healthy_height = (root_z >= min_z) & (root_z <= max_z)
+        healthy_height = (base_height >= min_z) & (base_height <= max_z)
         healthy_orientation = uprightness >= self._minimum_upright
         is_healthy = healthy_height & healthy_orientation
         is_healthy_float = is_healthy.astype(jp.float32)
