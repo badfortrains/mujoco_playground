@@ -37,29 +37,46 @@ def default_config() -> config_dict.ConfigDict:
         'impl': 'brax',
 
         # Policy command and gait parameters.
-        'target_velocity': 0.06,
-        'action_scale': 0.50,
-        'step_frequency': 0.8,
+        'target_velocity': 0.04,
+        'action_scale': 0.40,
+        'step_frequency': 0.68,
 
         # Four commands = 80 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
         'command_history_length': 4,
 
-        # Hidden actuator uncertainty.  The policy sees the command it sent,
-        # not the perturbed/lagged command used by the simulation.
-        'servo_response': 0.30,
-        'action_noise_scale': 0.02,
+        # Hidden actuator uncertainty.  These quantities are sampled once per
+        # episode and independently for each servo unless noted otherwise.
+        # The policy sees the command it sent, not the delayed or perturbed
+        # command used by the simulation.
+        'servo_response_range': (0.20, 0.45),
+        'servo_center_offset_scale_us': 20.0,
+        'servo_gain_range': (0.90, 1.10),
+        'servo_strength_range': (0.80, 1.20),
+        'servo_speed_range': (4.0, 10.0),  # rad/s under load.
+        'servo_deadband_range_us': (5.0, 20.0),
+        'action_delay_range': (0, 2),  # Controller frames, inclusive.
+        'action_noise_scale': 0.03,
 
-        # Reset randomization.
-        'reset_noise_scale': 0.002,
+        # Reset randomization.  Keep units separate: a single scale applied to
+        # the free joint, quaternion, and leg joints is not physically useful.
+        'root_position_noise_scale': (0.002, 0.002, 0.001),  # m.
+        'root_tilt_noise_scale': 0.052,  # rad, about 3 degrees.
+        'joint_position_noise_scale': 0.03,  # rad.
+        'root_linear_velocity_noise_scale': 0.02,  # m/s.
+        'root_angular_velocity_noise_scale': 0.10,  # rad/s.
+        'joint_velocity_noise_scale': 0.10,  # rad/s.
 
-        # IMU observation model.  Projected gravity is a unit-vector estimate
-        # from accelerometer/gyro fusion; gyro values are in rad/s.
-        'gravity_noise_scale': 0.02,
-        'gravity_bias_scale': 0.01,
+        # Deployment-like IMU model.  The simulated accelerometer includes
+        # body acceleration and drives the same 6-DoF Madgwick update used by
+        # the Pico.  Accelerometer values are in g and gyro values in rad/s.
+        'accelerometer_noise_scale': 0.02,
+        'accelerometer_bias_scale': 0.01,
+        'accelerometer_range': 4.0,
         'gyro_noise_scale': 0.03,
         'gyro_bias_scale': 0.02,
         'gyro_obs_scale': 0.25,
+        'madgwick_beta': 0.10,
 
         # Task rewards.
         'velocity_tracking_weight': 2.0,
@@ -67,13 +84,13 @@ def default_config() -> config_dict.ConfigDict:
         'sideways_velocity_cost_weight': 0.05,
         'yaw_rate_cost_weight': 0.20,
         'heading_cost_weight': 0.50,
-        'orientation_cost_weight': 0.30,
-        'action_rate_cost_weight': 0.02,
-        # The Pico maps a pi-radian servo range to 2000 us.  Penalize command
-        # changes inside the measured MG90S deadband so the policy learns to
-        # either hold position or make a change the real servo can execute.
-        'servo_deadband_us': 10.0,
-        'servo_deadband_cost_weight': 0.05,
+        'orientation_cost_weight': 0.75,
+        'roll_pitch_rate_cost_weight': 0.05,
+        'action_rate_cost_weight': 0.05,
+        'action_acceleration_cost_weight': 0.02,
+        # Penalize changes inside the episode's sampled MG90S deadband so the
+        # policy learns to hold or make a change the real servo can execute.
+        'servo_deadband_cost_weight': 0.01,
         'healthy_reward': 0.20,
         'vertical_velocity_cost_weight': 0.05,
 
@@ -113,19 +130,52 @@ class Joystick(mjx_env.MjxEnv):
 
         self._action_dim = self._mjx_model.nu
         self._history_len = config.command_history_length
+        if self._history_len < 2:
+            raise ValueError("command_history_length must be at least 2")
 
         self._target_velocity = config.target_velocity
         self._action_scale = config.action_scale
         self._step_frequency = config.step_frequency
-        self._servo_response = config.servo_response
+        self._servo_response_range = config.servo_response_range
+        self._servo_center_offset_scale_us = (
+            config.servo_center_offset_scale_us
+        )
+        self._servo_gain_range = config.servo_gain_range
+        self._servo_strength_range = config.servo_strength_range
+        self._servo_speed_range = config.servo_speed_range
+        self._servo_deadband_range_us = config.servo_deadband_range_us
+        self._action_delay_range = config.action_delay_range
+        self._max_action_delay = int(config.action_delay_range[1])
         self._action_noise_scale = config.action_noise_scale
-        self._reset_noise_scale = config.reset_noise_scale
 
-        self._gravity_noise_scale = config.gravity_noise_scale
-        self._gravity_bias_scale = config.gravity_bias_scale
+        self._root_position_noise_scale = jp.array(
+            config.root_position_noise_scale
+        )
+        self._root_tilt_noise_scale = config.root_tilt_noise_scale
+        self._joint_position_noise_scale = (
+            config.joint_position_noise_scale
+        )
+        self._root_linear_velocity_noise_scale = (
+            config.root_linear_velocity_noise_scale
+        )
+        self._root_angular_velocity_noise_scale = (
+            config.root_angular_velocity_noise_scale
+        )
+        self._joint_velocity_noise_scale = (
+            config.joint_velocity_noise_scale
+        )
+
+        self._accelerometer_noise_scale = (
+            config.accelerometer_noise_scale
+        )
+        self._accelerometer_bias_scale = (
+            config.accelerometer_bias_scale
+        )
+        self._accelerometer_range = config.accelerometer_range
         self._gyro_noise_scale = config.gyro_noise_scale
         self._gyro_bias_scale = config.gyro_bias_scale
         self._gyro_obs_scale = config.gyro_obs_scale
+        self._madgwick_beta = config.madgwick_beta
 
         self._velocity_tracking_weight = config.velocity_tracking_weight
         self._tracking_sigma = config.tracking_sigma
@@ -135,8 +185,13 @@ class Joystick(mjx_env.MjxEnv):
         self._yaw_rate_cost_weight = config.yaw_rate_cost_weight
         self._heading_cost_weight = config.heading_cost_weight
         self._orientation_cost_weight = config.orientation_cost_weight
+        self._roll_pitch_rate_cost_weight = (
+            config.roll_pitch_rate_cost_weight
+        )
         self._action_rate_cost_weight = config.action_rate_cost_weight
-        self._servo_deadband_us = config.servo_deadband_us
+        self._action_acceleration_cost_weight = (
+            config.action_acceleration_cost_weight
+        )
         self._servo_deadband_cost_weight = (
             config.servo_deadband_cost_weight
         )
@@ -210,37 +265,125 @@ class Joystick(mjx_env.MjxEnv):
 
     def reset(self, rng: jp.ndarray) -> mjx_env.State:
         (
-            qpos_key,
-            qvel_key,
+            root_position_key,
+            root_tilt_key,
+            joint_position_key,
+            root_linear_velocity_key,
+            root_angular_velocity_key,
+            joint_velocity_key,
             phase_key,
-            gravity_bias_key,
+            accelerometer_bias_key,
             gyro_bias_key,
-            obs_key,
+            servo_center_key,
+            servo_gain_key,
+            servo_strength_key,
+            servo_speed_key,
+            servo_response_key,
+            servo_deadband_key,
+            action_delay_key,
+            initial_gyro_key,
             step_key,
-        ) = jax.random.split(rng, 7)
+        ) = jax.random.split(rng, 18)
 
-        low, high = -self._reset_noise_scale, self._reset_noise_scale
-        qpos = self._mjx_model.qpos0 + jax.random.uniform(
-            qpos_key,
-            (self._mjx_model.nq,),
-            minval=low,
-            maxval=high,
+        qpos = self._mjx_model.qpos0
+        root_position_noise = jax.random.uniform(
+            root_position_key,
+            (3,),
+            minval=-self._root_position_noise_scale,
+            maxval=self._root_position_noise_scale,
         )
-        root_quat = qpos[3:7]
+        qpos = qpos.at[:3].add(root_position_noise)
+
+        roll_pitch = jax.random.uniform(
+            root_tilt_key,
+            (2,),
+            minval=-self._root_tilt_noise_scale,
+            maxval=self._root_tilt_noise_scale,
+        )
+        tilt_quat = self._roll_pitch_quat(roll_pitch)
+        root_quat = math.quat_mul(qpos[3:7], tilt_quat)
         root_quat = root_quat / jp.linalg.norm(root_quat)
         qpos = qpos.at[3:7].set(root_quat)
+        joint_position_noise = jax.random.uniform(
+            joint_position_key,
+            (self._action_dim,),
+            minval=-self._joint_position_noise_scale,
+            maxval=self._joint_position_noise_scale,
+        )
+        qpos = qpos.at[7:].add(joint_position_noise)
 
-        qvel = jax.random.uniform(
-            qvel_key,
-            (self._mjx_model.nv,),
-            minval=low,
-            maxval=high,
+        qvel = jp.zeros((self._mjx_model.nv,))
+        qvel = qvel.at[:3].set(jax.random.uniform(
+            root_linear_velocity_key,
+            (3,),
+            minval=-self._root_linear_velocity_noise_scale,
+            maxval=self._root_linear_velocity_noise_scale,
+        ))
+        qvel = qvel.at[3:6].set(jax.random.uniform(
+            root_angular_velocity_key,
+            (3,),
+            minval=-self._root_angular_velocity_noise_scale,
+            maxval=self._root_angular_velocity_noise_scale,
+        ))
+        qvel = qvel.at[6:].set(jax.random.uniform(
+            joint_velocity_key,
+            (self._action_dim,),
+            minval=-self._joint_velocity_noise_scale,
+            maxval=self._joint_velocity_noise_scale,
+        ))
+
+        servo_center_offset = (
+            jax.random.uniform(
+                servo_center_key,
+                (self._action_dim,),
+                minval=-self._servo_center_offset_scale_us,
+                maxval=self._servo_center_offset_scale_us,
+            )
+            / _SERVO_US_PER_RADIAN
+        )
+        servo_gain = self._sample_uniform(
+            servo_gain_key,
+            self._servo_gain_range,
+            (self._action_dim,),
+        )
+        servo_strength = self._sample_uniform(
+            servo_strength_key,
+            self._servo_strength_range,
+            (self._action_dim,),
+        )
+        servo_speed = self._sample_uniform(
+            servo_speed_key,
+            self._servo_speed_range,
+            (self._action_dim,),
+        )
+        servo_response = self._sample_uniform(
+            servo_response_key,
+            self._servo_response_range,
+            (self._action_dim,),
+        )
+        servo_deadband_us = self._sample_uniform(
+            servo_deadband_key,
+            self._servo_deadband_range_us,
+            (self._action_dim,),
+        )
+        action_delay = jax.random.randint(
+            action_delay_key,
+            (),
+            minval=int(self._action_delay_range[0]),
+            maxval=int(self._action_delay_range[1]) + 1,
+        )
+
+        motor_targets = jp.clip(
+            self._default_pose + servo_center_offset,
+            self._ctrl_min,
+            self._ctrl_max,
         )
 
         data = mujoco_playground._src.mjx_env.make_data(
             self._mj_model,
             qpos=qpos,
             qvel=qvel,
+            ctrl=motor_targets,
         )
         data = mjx.forward(self._mjx_model, data)
 
@@ -250,13 +393,17 @@ class Joystick(mjx_env.MjxEnv):
             maxval=jp.pi,
         )
         command_history = jp.zeros((self._history_len, self._action_dim))
+        command_delay_history = jp.zeros(
+            (self._max_action_delay + 1, self._action_dim)
+        )
+        accepted_servo_command = jp.zeros((self._action_dim,))
         servo_action = jp.zeros((self._action_dim,))
 
-        gravity_bias = jax.random.uniform(
-            gravity_bias_key,
+        accelerometer_bias = jax.random.uniform(
+            accelerometer_bias_key,
             (3,),
-            minval=-self._gravity_bias_scale,
-            maxval=self._gravity_bias_scale,
+            minval=-self._accelerometer_bias_scale,
+            maxval=self._accelerometer_bias_scale,
         )
         gyro_bias = jax.random.uniform(
             gyro_bias_key,
@@ -265,15 +412,23 @@ class Joystick(mjx_env.MjxEnv):
             maxval=self._gyro_bias_scale,
         )
 
-        gravity_local, gyro_local = self._get_imu_signals(data)
+        # The Pico currently resets its attitude estimate to identity on START.
+        # Keeping that behavior in training exposes the policy to estimator
+        # convergence when the physical robot is not perfectly level.
+        imu_quat = jp.array([1.0, 0.0, 0.0, 0.0])
+        gravity_estimate = self._gravity_from_quat(imu_quat)
+        _, gyro_local = self._get_imu_signals(data)
+        gyro_measurement = (
+            gyro_local
+            + gyro_bias
+            + jax.random.normal(initial_gyro_key, (3,))
+            * self._gyro_noise_scale
+        )
         observation = self._get_observation(
             command_history=command_history,
-            gravity_local=gravity_local,
-            gyro_local=gyro_local,
+            gravity_estimate=gravity_estimate,
+            gyro_measurement=gyro_measurement,
             phase=phase,
-            gravity_bias=gravity_bias,
-            gyro_bias=gyro_bias,
-            noise_key=obs_key,
         )
 
         zero = jp.array(0.0)
@@ -285,7 +440,9 @@ class Joystick(mjx_env.MjxEnv):
             'cost_yaw_rate': zero,
             'cost_heading': zero,
             'cost_orientation': zero,
+            'cost_roll_pitch_rate': zero,
             'cost_action_rate': zero,
+            'cost_action_acceleration': zero,
             'cost_servo_deadband': zero,
             'cost_vertical_velocity': zero,
             'cost_foot_slip': zero,
@@ -315,9 +472,21 @@ class Joystick(mjx_env.MjxEnv):
             metrics=metrics,
             info={
                 'command_history': command_history,
+                'command_delay_history': command_delay_history,
+                'accepted_servo_command': accepted_servo_command,
                 'servo_action': servo_action,
+                'motor_targets': motor_targets,
+                'servo_center_offset': servo_center_offset,
+                'servo_gain': servo_gain,
+                'servo_strength': servo_strength,
+                'servo_speed': servo_speed,
+                'servo_response': servo_response,
+                'servo_deadband_us': servo_deadband_us,
+                'action_delay': action_delay,
                 'phase': phase,
-                'gravity_bias': gravity_bias,
+                'imu_quat': imu_quat,
+                'previous_com_velocity_world': jp.zeros((3,)),
+                'accelerometer_bias': accelerometer_bias,
                 'gyro_bias': gyro_bias,
                 'rng': step_key,
             },
@@ -328,8 +497,13 @@ class Joystick(mjx_env.MjxEnv):
         state: mjx_env.State,
         action: jp.ndarray,
     ) -> mjx_env.State:
-        action_noise_key, obs_key, step_key = jax.random.split(
-            state.info['rng'], 3
+        (
+            action_noise_key,
+            accelerometer_noise_key,
+            gyro_noise_key,
+            step_key,
+        ) = jax.random.split(
+            state.info['rng'], 4
         )
 
         # The controller knows this clipped command, so this is what enters
@@ -340,6 +514,14 @@ class Joystick(mjx_env.MjxEnv):
         action_rate_cost = (
             self._action_rate_cost_weight
             * jp.sum(jp.square(command - previous_command))
+        )
+        previous_previous_command = command_history[-2]
+        action_acceleration = (
+            command - 2.0 * previous_command + previous_previous_command
+        )
+        action_acceleration_cost = (
+            self._action_acceleration_cost_weight
+            * jp.sum(jp.square(action_acceleration))
         )
 
         # Convert policy-command changes into the pulse-width changes sent by
@@ -353,7 +535,7 @@ class Joystick(mjx_env.MjxEnv):
             * _SERVO_US_PER_RADIAN
         )
         deadband_fraction = jp.clip(
-            action_delta_us / self._servo_deadband_us,
+            action_delta_us / state.info['servo_deadband_us'],
             0.0,
             1.0,
         )
@@ -366,33 +548,78 @@ class Joystick(mjx_env.MjxEnv):
             )
         )
 
+        # Delay the hidden actuator path while retaining the current sent
+        # command in the policy-visible history, exactly as on the Pico.
+        command_delay_history = jp.roll(
+            state.info['command_delay_history'], shift=-1, axis=0
+        )
+        command_delay_history = command_delay_history.at[-1].set(command)
+        delay_index = self._max_action_delay - state.info['action_delay']
+        delayed_command = jax.lax.dynamic_index_in_dim(
+            command_delay_history,
+            delay_index,
+            axis=0,
+            keepdims=False,
+        )
+
         actuation_error = (
             jax.random.normal(action_noise_key, command.shape)
             * self._action_noise_scale
         )
         uncertain_action = jp.clip(
-            command + actuation_error,
+            delayed_command + actuation_error,
             -1.0,
             1.0,
         )
+
+        # MG90S command deadband: retain the last internally accepted target
+        # until the pulse-width change is large enough for that servo.
+        accepted_servo_command = state.info['accepted_servo_command']
+        servo_input_delta_us = (
+            jp.abs(uncertain_action - accepted_servo_command)
+            * self._action_scale
+            * _SERVO_US_PER_RADIAN
+        )
+        accepted_servo_command = jp.where(
+            servo_input_delta_us >= state.info['servo_deadband_us'],
+            uncertain_action,
+            accepted_servo_command,
+        )
         servo_action = (
-            self._servo_response * uncertain_action
-            + (1.0 - self._servo_response) * state.info['servo_action']
+            state.info['servo_response'] * accepted_servo_command
+            + (1.0 - state.info['servo_response'])
+            * state.info['servo_action']
         )
 
-        motor_targets = self._default_pose + self._action_scale * servo_action
-        motor_targets = jp.clip(
-            motor_targets,
+        desired_motor_targets = (
+            self._default_pose
+            + state.info['servo_center_offset']
+            + self._action_scale * state.info['servo_gain'] * servo_action
+        )
+        desired_motor_targets = jp.clip(
+            desired_motor_targets,
             self._ctrl_min,
             self._ctrl_max,
+        )
+        max_target_delta = state.info['servo_speed'] * self.dt
+        motor_targets = state.info['motor_targets'] + jp.clip(
+            desired_motor_targets - state.info['motor_targets'],
+            -max_target_delta,
+            max_target_delta,
         )
 
         new_command_history = jp.roll(command_history, shift=-1, axis=0)
         new_command_history = new_command_history.at[-1].set(command)
 
         data0 = state.data
+        step_model = self._mjx_model.tree_replace({
+            'actuator_forcerange': (
+                self._mjx_model.actuator_forcerange
+                * state.info['servo_strength'][:, None]
+            ),
+        })
         data = mjx_env.step(
-            self._mjx_model,
+            step_model,
             data0,
             motor_targets,
             self.n_substeps,
@@ -471,6 +698,10 @@ class Joystick(mjx_env.MjxEnv):
         )
         yaw_rate = root_angular_velocity_world[2]
         yaw_rate_cost = self._yaw_rate_cost_weight * jp.square(yaw_rate)
+        roll_pitch_rate_cost = (
+            self._roll_pitch_rate_cost_weight
+            * jp.sum(jp.square(root_angular_velocity_local[:2]))
+        )
 
         body_forward_world = math.rotate(self._forward_world, root_quat)
         body_forward_xy = body_forward_world[:2]
@@ -525,7 +756,9 @@ class Joystick(mjx_env.MjxEnv):
             - yaw_rate_cost
             - heading_cost
             - tilt_cost
+            - roll_pitch_rate_cost
             - action_rate_cost
+            - action_acceleration_cost
             - servo_deadband_cost
             - vertical_velocity_cost
             - foot_slip_cost
@@ -533,17 +766,45 @@ class Joystick(mjx_env.MjxEnv):
             - energy_cost
         )
 
-        # Only these two state-derived signals are exposed, and both are
-        # obtainable from the LSM6DSO.  All reward state above is privileged.
-        _, gyro_local = self._get_imu_signals(data)
+        # Build deployment-like raw IMU samples.  An accelerometer measures
+        # specific force (linear acceleration minus gravity), not orientation.
+        # Contact impulses and fore/aft acceleration therefore perturb the
+        # attitude estimate here just as they do on the physical robot.
+        linear_acceleration_world = (
+            velocity_world - state.info['previous_com_velocity_world']
+        ) / self.dt
+        specific_force_world = (
+            linear_acceleration_world - jp.array([0.0, 0.0, -9.81])
+        ) / 9.81
+        specific_force_local = math.rotate(specific_force_world, inv_quat)
+        accelerometer_measurement = jp.clip(
+            specific_force_local
+            + state.info['accelerometer_bias']
+            + jax.random.normal(accelerometer_noise_key, (3,))
+            * self._accelerometer_noise_scale,
+            -self._accelerometer_range,
+            self._accelerometer_range,
+        )
+        gyro_measurement = (
+            root_angular_velocity_local
+            + state.info['gyro_bias']
+            + jax.random.normal(gyro_noise_key, (3,))
+            * self._gyro_noise_scale
+        )
+        imu_quat = self._update_attitude_estimate(
+            state.info['imu_quat'],
+            gyro_measurement,
+            accelerometer_measurement,
+        )
+        gravity_estimate = self._gravity_from_quat(imu_quat)
+
+        # Only the filtered gravity estimate and raw gyro are exposed.  All
+        # reward state above remains privileged to training.
         observation = self._get_observation(
             command_history=new_command_history,
-            gravity_local=gravity_local,
-            gyro_local=gyro_local,
+            gravity_estimate=gravity_estimate,
+            gyro_measurement=gyro_measurement,
             phase=phase,
-            gravity_bias=state.info['gravity_bias'],
-            gyro_bias=state.info['gyro_bias'],
-            noise_key=obs_key,
         )
 
         state.metrics.update(
@@ -554,7 +815,9 @@ class Joystick(mjx_env.MjxEnv):
             cost_yaw_rate=-yaw_rate_cost,
             cost_heading=-heading_cost,
             cost_orientation=-tilt_cost,
+            cost_roll_pitch_rate=-roll_pitch_rate_cost,
             cost_action_rate=-action_rate_cost,
+            cost_action_acceleration=-action_acceleration_cost,
             cost_servo_deadband=-servo_deadband_cost,
             cost_vertical_velocity=-vertical_velocity_cost,
             cost_foot_slip=-foot_slip_cost,
@@ -584,8 +847,13 @@ class Joystick(mjx_env.MjxEnv):
             info={
                 **state.info,
                 'command_history': new_command_history,
+                'command_delay_history': command_delay_history,
+                'accepted_servo_command': accepted_servo_command,
                 'servo_action': servo_action,
+                'motor_targets': motor_targets,
                 'phase': phase,
+                'imu_quat': imu_quat,
+                'previous_com_velocity_world': velocity_world,
                 'rng': step_key,
             },
         )
@@ -593,12 +861,9 @@ class Joystick(mjx_env.MjxEnv):
     def _get_observation(
         self,
         command_history: jp.ndarray,
-        gravity_local: jp.ndarray,
-        gyro_local: jp.ndarray,
+        gravity_estimate: jp.ndarray,
+        gyro_measurement: jp.ndarray,
         phase: jp.ndarray,
-        gravity_bias: jp.ndarray,
-        gyro_bias: jp.ndarray,
-        noise_key: jp.ndarray,
     ) -> jp.ndarray:
         """Builds the 41-value observation available on the real robot.
 
@@ -609,25 +874,6 @@ class Joystick(mjx_env.MjxEnv):
           38:40 sin/cos gait clock
           40    commanded speed in m/s
         """
-        gravity_key, gyro_key = jax.random.split(noise_key)
-
-        gravity_estimate = (
-            gravity_local
-            + gravity_bias
-            + jax.random.normal(gravity_key, (3,))
-            * self._gravity_noise_scale
-        )
-        gravity_estimate = gravity_estimate / jp.maximum(
-            jp.linalg.norm(gravity_estimate),
-            1e-6,
-        )
-
-        gyro_measurement = (
-            gyro_local
-            + gyro_bias
-            + jax.random.normal(gyro_key, (3,)) * self._gyro_noise_scale
-        )
-
         clock = jp.array([jp.sin(phase), jp.cos(phase)])
         return jp.clip(
             jp.concatenate([
@@ -639,6 +885,111 @@ class Joystick(mjx_env.MjxEnv):
             ]),
             -10.0,
             10.0,
+        )
+
+    @staticmethod
+    def _sample_uniform(
+        rng: jp.ndarray,
+        value_range,
+        shape: tuple[int, ...],
+    ) -> jp.ndarray:
+        return jax.random.uniform(
+            rng,
+            shape,
+            minval=value_range[0],
+            maxval=value_range[1],
+        )
+
+    @staticmethod
+    def _roll_pitch_quat(roll_pitch: jp.ndarray) -> jp.ndarray:
+        half_roll = 0.5 * roll_pitch[0]
+        half_pitch = 0.5 * roll_pitch[1]
+        roll_quat = jp.array([
+            jp.cos(half_roll),
+            jp.sin(half_roll),
+            0.0,
+            0.0,
+        ])
+        pitch_quat = jp.array([
+            jp.cos(half_pitch),
+            0.0,
+            jp.sin(half_pitch),
+            0.0,
+        ])
+        return math.quat_mul(roll_quat, pitch_quat)
+
+    def _update_attitude_estimate(
+        self,
+        quat: jp.ndarray,
+        gyro: jp.ndarray,
+        accelerometer: jp.ndarray,
+    ) -> jp.ndarray:
+        """Runs one firmware-equivalent 6-DoF Madgwick filter update."""
+        q0, q1, q2, q3 = quat
+        gx, gy, gz = gyro
+
+        q_dot = 0.5 * jp.array([
+            -q1 * gx - q2 * gy - q3 * gz,
+            q0 * gx + q2 * gz - q3 * gy,
+            q0 * gy - q1 * gz + q3 * gx,
+            q0 * gz + q1 * gy - q2 * gx,
+        ])
+
+        accelerometer_norm_squared = jp.sum(jp.square(accelerometer))
+        normalized_accelerometer = accelerometer / jp.sqrt(
+            jp.maximum(accelerometer_norm_squared, 1e-12)
+        )
+        ax, ay, az = normalized_accelerometer
+
+        two_q0 = 2.0 * q0
+        two_q1 = 2.0 * q1
+        two_q2 = 2.0 * q2
+        two_q3 = 2.0 * q3
+        four_q0 = 4.0 * q0
+        four_q1 = 4.0 * q1
+        four_q2 = 4.0 * q2
+        eight_q1 = 8.0 * q1
+        eight_q2 = 8.0 * q2
+        q0_squared = q0 * q0
+        q1_squared = q1 * q1
+        q2_squared = q2 * q2
+        q3_squared = q3 * q3
+
+        correction = jp.array([
+            four_q0 * q2_squared + two_q2 * ax
+            + four_q0 * q1_squared - two_q1 * ay,
+            four_q1 * q3_squared - two_q3 * ax
+            + 4.0 * q0_squared * q1 - two_q0 * ay - four_q1
+            + eight_q1 * q1_squared + eight_q1 * q2_squared
+            + four_q1 * az,
+            4.0 * q0_squared * q2 + two_q0 * ax
+            + four_q2 * q3_squared - two_q3 * ay - four_q2
+            + eight_q2 * q1_squared + eight_q2 * q2_squared
+            + four_q2 * az,
+            4.0 * q1_squared * q3 - two_q1 * ax
+            + 4.0 * q2_squared * q3 - two_q2 * ay,
+        ])
+        correction_norm_squared = jp.sum(jp.square(correction))
+        use_correction = (
+            (accelerometer_norm_squared > 1e-12)
+            & (correction_norm_squared > 1e-12)
+        )
+        correction_scale = jp.where(
+            use_correction,
+            jp.reciprocal(jp.sqrt(jp.maximum(
+                correction_norm_squared, 1e-12
+            ))),
+            0.0,
+        )
+        q_dot = q_dot - self._madgwick_beta * correction * correction_scale
+
+        quat = quat + q_dot * self.dt
+        return quat / jp.maximum(jp.linalg.norm(quat), 1e-6)
+
+    def _gravity_from_quat(self, quat: jp.ndarray) -> jp.ndarray:
+        return math.rotate(
+            jp.array([0.0, 0.0, -1.0]),
+            self._quat_inverse(quat),
         )
 
     @staticmethod
