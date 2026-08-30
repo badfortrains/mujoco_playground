@@ -96,7 +96,7 @@ def default_config() -> config_dict.ConfigDict:
 
         # Gait shaping copied from the successful simple task.
         'foot_phase_reward_weight': 1.0,
-        'swing_foot_height': 0.012,
+        'swing_foot_height': 0.02,
         'foot_height_tracking_sigma': 2.5e-5,
         'foot_slip_cost_weight': 20.0,
         'base_height_cost_weight': 0.10,
