@@ -24,6 +24,9 @@ from mujoco_playground._src import mjx_env
 from mujoco_playground._src.locomotion.rick import rick_constants as consts
 
 
+_SERVO_US_PER_RADIAN = 2000.0 / 3.141592653589793
+
+
 def default_config() -> config_dict.ConfigDict:
     return config_dict.ConfigDict({
         # Simulation / control.
@@ -33,9 +36,9 @@ def default_config() -> config_dict.ConfigDict:
         'action_repeat': 1,
         'impl': 'brax',
 
-        # Match the gait learned in joystick_simple.py.
+        # Policy command and gait parameters.
         'target_velocity': 0.06,
-        'action_scale': 0.35,
+        'action_scale': 0.50,
         'step_frequency': 0.8,
 
         # Four commands = 80 ms of controller-known history at 50 Hz.  This
@@ -66,6 +69,11 @@ def default_config() -> config_dict.ConfigDict:
         'heading_cost_weight': 0.50,
         'orientation_cost_weight': 0.30,
         'action_rate_cost_weight': 0.02,
+        # The Pico maps a pi-radian servo range to 2000 us.  Penalize command
+        # changes inside the measured MG90S deadband so the policy learns to
+        # either hold position or make a change the real servo can execute.
+        'servo_deadband_us': 10.0,
+        'servo_deadband_cost_weight': 0.05,
         'healthy_reward': 0.20,
         'vertical_velocity_cost_weight': 0.05,
 
@@ -128,6 +136,10 @@ class Joystick(mjx_env.MjxEnv):
         self._heading_cost_weight = config.heading_cost_weight
         self._orientation_cost_weight = config.orientation_cost_weight
         self._action_rate_cost_weight = config.action_rate_cost_weight
+        self._servo_deadband_us = config.servo_deadband_us
+        self._servo_deadband_cost_weight = (
+            config.servo_deadband_cost_weight
+        )
         self._healthy_reward = config.healthy_reward
         self._vertical_velocity_cost_weight = (
             config.vertical_velocity_cost_weight
@@ -274,6 +286,7 @@ class Joystick(mjx_env.MjxEnv):
             'cost_heading': zero,
             'cost_orientation': zero,
             'cost_action_rate': zero,
+            'cost_servo_deadband': zero,
             'cost_vertical_velocity': zero,
             'cost_foot_slip': zero,
             'cost_base_height': zero,
@@ -327,6 +340,30 @@ class Joystick(mjx_env.MjxEnv):
         action_rate_cost = (
             self._action_rate_cost_weight
             * jp.sum(jp.square(command - previous_command))
+        )
+
+        # Convert policy-command changes into the pulse-width changes sent by
+        # the Pico firmware.  This smooth bump is zero for a true hold and for
+        # a step at or above the deadband, and largest halfway between them.
+        # It therefore discourages ineffective fine adjustments without
+        # rewarding gratuitously large action changes.
+        action_delta_us = (
+            jp.abs(command - previous_command)
+            * self._action_scale
+            * _SERVO_US_PER_RADIAN
+        )
+        deadband_fraction = jp.clip(
+            action_delta_us / self._servo_deadband_us,
+            0.0,
+            1.0,
+        )
+        servo_deadband_cost = (
+            self._servo_deadband_cost_weight
+            * jp.sum(
+                4.0
+                * deadband_fraction
+                * (1.0 - deadband_fraction)
+            )
         )
 
         actuation_error = (
@@ -489,6 +526,7 @@ class Joystick(mjx_env.MjxEnv):
             - heading_cost
             - tilt_cost
             - action_rate_cost
+            - servo_deadband_cost
             - vertical_velocity_cost
             - foot_slip_cost
             - base_height_cost
@@ -517,6 +555,7 @@ class Joystick(mjx_env.MjxEnv):
             cost_heading=-heading_cost,
             cost_orientation=-tilt_cost,
             cost_action_rate=-action_rate_cost,
+            cost_servo_deadband=-servo_deadband_cost,
             cost_vertical_velocity=-vertical_velocity_cost,
             cost_foot_slip=-foot_slip_cost,
             cost_base_height=-base_height_cost,
