@@ -64,6 +64,19 @@ class JoystickTest(absltest.TestCase):
     )
     self.assertLess(float(final_error), 0.01 * float(initial_error))
 
+  def test_prewarmed_attitude_starts_at_body_tilt(self):
+    root_quat = self.env._roll_pitch_quat(
+        jp.array([jp.deg2rad(7.0), jp.deg2rad(-11.0)])
+    )
+    imu_quat = jax.jit(self.env._prewarmed_attitude_estimate)(root_quat)
+
+    np.testing.assert_allclose(
+        self.env._gravity_from_quat(imu_quat),
+        self.env._gravity_from_quat(root_quat),
+        atol=1e-7,
+    )
+    self.assertGreater(float(jp.linalg.norm(imu_quat[1:])), 0.01)
+
   def test_observation_keeps_firmware_layout(self):
     command_history = jp.arange(32, dtype=jp.float32).reshape((4, 8)) / 32
     gravity = jp.array([0.1, -0.2, -0.97])

@@ -96,7 +96,7 @@ def default_config() -> config_dict.ConfigDict:
 
         # Gait shaping copied from the successful simple task.
         'foot_phase_reward_weight': 1.0,
-        'swing_foot_height': 0.02,
+        'swing_foot_height': 0.015,
         'foot_height_tracking_sigma': 2.5e-5,
         'foot_slip_cost_weight': 20.0,
         'base_height_cost_weight': 0.10,
@@ -412,10 +412,10 @@ class Joystick(mjx_env.MjxEnv):
             maxval=self._gyro_bias_scale,
         )
 
-        # The Pico currently resets its attitude estimate to identity on START.
-        # Keeping that behavior in training exposes the policy to estimator
-        # convergence when the physical robot is not perfectly level.
-        imu_quat = jp.array([1.0, 0.0, 0.0, 0.0])
+        # The Pico runs Madgwick continuously while stopped and preserves the
+        # settled estimate on START.  Begin from the simulated body's current
+        # attitude to match that prewarmed deployment behavior.
+        imu_quat = self._prewarmed_attitude_estimate(root_quat)
         gravity_estimate = self._gravity_from_quat(imu_quat)
         _, gyro_local = self._get_imu_signals(data)
         gyro_measurement = (
@@ -995,6 +995,11 @@ class Joystick(mjx_env.MjxEnv):
     @staticmethod
     def _quat_inverse(quat: jp.ndarray) -> jp.ndarray:
         return jp.array([quat[0], -quat[1], -quat[2], -quat[3]])
+
+    @staticmethod
+    def _prewarmed_attitude_estimate(root_quat: jp.ndarray) -> jp.ndarray:
+        """Returns the settled attitude estimate available before START."""
+        return root_quat / jp.maximum(jp.linalg.norm(root_quat), 1e-6)
 
     def _get_imu_signals(
         self,
