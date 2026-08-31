@@ -41,9 +41,9 @@ def default_config() -> config_dict.ConfigDict:
         'action_scale': 0.40,
         'step_frequency': 0.68,
 
-        # Four commands = 80 ms of controller-known history at 50 Hz.  This
+        # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
-        'command_history_length': 4,
+        'command_history_length': 12,
 
         # Hidden actuator uncertainty.  These quantities are sampled once per
         # episode and independently for each servo unless noted otherwise.
@@ -221,6 +221,13 @@ class Joystick(mjx_env.MjxEnv):
             mujoco.mjtObj.mjOBJ_BODY.value,
             'body',
         )
+        self._imu_site_id = mujoco.mj_name2id(
+            self._mj_model,
+            mujoco.mjtObj.mjOBJ_SITE.value,
+            'imu',
+        )
+        self._imu_body_id = self._mj_model.site_bodyid[self._imu_site_id]
+        self._imu_site_quat = self._mjx_model.site_quat[self._imu_site_id]
         self._feet_site_ids = jp.array([
             mujoco.mj_name2id(
                 self._mj_model,
@@ -413,9 +420,11 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         # The Pico runs Madgwick continuously while stopped and preserves the
-        # settled estimate on START.  Begin from the simulated body's current
-        # attitude to match that prewarmed deployment behavior.
-        imu_quat = self._prewarmed_attitude_estimate(root_quat)
+        # settled estimate on START.  Begin from the simulated IMU site's
+        # current attitude to match that prewarmed deployment behavior.
+        imu_quat = self._prewarmed_attitude_estimate(
+            self._get_imu_quat(data)
+        )
         gravity_estimate = self._gravity_from_quat(imu_quat)
         _, gyro_local = self._get_imu_signals(data)
         gyro_measurement = (
@@ -485,7 +494,7 @@ class Joystick(mjx_env.MjxEnv):
                 'action_delay': action_delay,
                 'phase': phase,
                 'imu_quat': imu_quat,
-                'previous_com_velocity_world': jp.zeros((3,)),
+                'previous_imu_velocity_world': jp.zeros((3,)),
                 'accelerometer_bias': accelerometer_bias,
                 'gyro_bias': gyro_bias,
                 'rng': step_key,
@@ -766,17 +775,20 @@ class Joystick(mjx_env.MjxEnv):
             - energy_cost
         )
 
-        # Build deployment-like raw IMU samples.  An accelerometer measures
-        # specific force (linear acceleration minus gravity), not orientation.
-        # Contact impulses and fore/aft acceleration therefore perturb the
-        # attitude estimate here just as they do on the physical robot.
+        # Build deployment-like raw IMU samples at the XML's IMU site.  An
+        # accelerometer measures specific force (linear acceleration minus
+        # gravity), not orientation.  Its offset from the COM means angular
+        # motion also contributes to the simulated measurement.
+        imu_velocity_world = self._get_imu_linear_velocity_world(data0, data)
         linear_acceleration_world = (
-            velocity_world - state.info['previous_com_velocity_world']
+            imu_velocity_world - state.info['previous_imu_velocity_world']
         ) / self.dt
         specific_force_world = (
             linear_acceleration_world - jp.array([0.0, 0.0, -9.81])
         ) / 9.81
-        specific_force_local = math.rotate(specific_force_world, inv_quat)
+        specific_force_local = (
+            data.site_xmat[self._imu_site_id].T @ specific_force_world
+        )
         accelerometer_measurement = jp.clip(
             specific_force_local
             + state.info['accelerometer_bias']
@@ -785,8 +797,9 @@ class Joystick(mjx_env.MjxEnv):
             -self._accelerometer_range,
             self._accelerometer_range,
         )
+        _, gyro_local = self._get_imu_signals(data)
         gyro_measurement = (
-            root_angular_velocity_local
+            gyro_local
             + state.info['gyro_bias']
             + jax.random.normal(gyro_noise_key, (3,))
             * self._gyro_noise_scale
@@ -853,7 +866,7 @@ class Joystick(mjx_env.MjxEnv):
                 'motor_targets': motor_targets,
                 'phase': phase,
                 'imu_quat': imu_quat,
-                'previous_com_velocity_world': velocity_world,
+                'previous_imu_velocity_world': imu_velocity_world,
                 'rng': step_key,
             },
         )
@@ -865,14 +878,14 @@ class Joystick(mjx_env.MjxEnv):
         gyro_measurement: jp.ndarray,
         phase: jp.ndarray,
     ) -> jp.ndarray:
-        """Builds the 41-value observation available on the real robot.
+        """Builds the deployment observation (105 values by default).
 
-        Layout:
-          0:32  normalized command history, oldest to newest
-          32:35 unit gravity estimate in IMU/body coordinates
-          35:38 scaled gyroscope in IMU/body coordinates
-          38:40 sin/cos gait clock
-          40    commanded speed in m/s
+        With the default 12-frame history, the layout is:
+          0:96   normalized command history, oldest to newest
+          96:99  unit gravity estimate in IMU coordinates
+          99:102 scaled gyroscope in IMU coordinates
+          102:104 sin/cos gait clock
+          104     commanded speed in m/s
         """
         clock = jp.array([jp.sin(phase), jp.cos(phase)])
         return jp.clip(
@@ -997,22 +1010,43 @@ class Joystick(mjx_env.MjxEnv):
         return jp.array([quat[0], -quat[1], -quat[2], -quat[3]])
 
     @staticmethod
-    def _prewarmed_attitude_estimate(root_quat: jp.ndarray) -> jp.ndarray:
+    def _prewarmed_attitude_estimate(imu_quat: jp.ndarray) -> jp.ndarray:
         """Returns the settled attitude estimate available before START."""
-        return root_quat / jp.maximum(jp.linalg.norm(root_quat), 1e-6)
+        return imu_quat / jp.maximum(jp.linalg.norm(imu_quat), 1e-6)
+
+    def _get_imu_quat(self, data: mjx.Data) -> jp.ndarray:
+        """Returns the IMU site's local-to-world orientation quaternion."""
+        quat = math.quat_mul(
+            data.xquat[self._imu_body_id],
+            self._imu_site_quat,
+        )
+        return quat / jp.maximum(jp.linalg.norm(quat), 1e-6)
+
+    def _get_imu_linear_velocity_world(
+        self,
+        data_before: mjx.Data,
+        data_after: mjx.Data,
+    ) -> jp.ndarray:
+        """Returns finite-difference velocity at the IMU site's position."""
+        return (
+            data_after.site_xpos[self._imu_site_id]
+            - data_before.site_xpos[self._imu_site_id]
+        ) / self.dt
 
     def _get_imu_signals(
         self,
         data: mjx.Data,
     ) -> tuple[jp.ndarray, jp.ndarray]:
-        """Returns ideal projected gravity and gyro in the robot body frame."""
+        """Returns ideal projected gravity and gyro in the IMU site frame."""
         root_quat = data.qpos[3:7]
         root_quat = root_quat / jp.linalg.norm(root_quat)
-        gravity_local = math.rotate(
-            jp.array([0.0, 0.0, -1.0]),
-            self._quat_inverse(root_quat),
+        imu_xmat = data.site_xmat[self._imu_site_id]
+        gravity_local = imu_xmat.T @ jp.array([0.0, 0.0, -1.0])
+        gyro_world = math.rotate(
+            data.qvel[3:6],
+            root_quat,
         )
-        gyro_local = data.qvel[3:6]
+        gyro_local = imu_xmat.T @ gyro_world
         return gravity_local, gyro_local
 
     @staticmethod

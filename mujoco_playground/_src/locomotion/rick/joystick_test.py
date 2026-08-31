@@ -1,5 +1,7 @@
 """Tests for Rick's deployment-compatible controller models."""
 
+from types import SimpleNamespace
+
 from absl.testing import absltest
 import jax
 from jax import numpy as jp
@@ -24,6 +26,7 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.target_velocity, 0.04)
     self.assertEqual(config.action_scale, 0.40)
     self.assertEqual(config.step_frequency, 0.68)
+    self.assertEqual(config.command_history_length, 12)
     self.assertEqual(tuple(config.action_delay_range), (0, 2))
     self.assertEqual(config.joint_position_noise_scale, 0.03)
 
@@ -78,7 +81,9 @@ class JoystickTest(absltest.TestCase):
     self.assertGreater(float(jp.linalg.norm(imu_quat[1:])), 0.01)
 
   def test_observation_keeps_firmware_layout(self):
-    command_history = jp.arange(32, dtype=jp.float32).reshape((4, 8)) / 32
+    command_history = (
+        jp.arange(96, dtype=jp.float32).reshape((12, 8)) / 96
+    )
     gravity = jp.array([0.1, -0.2, -0.97])
     gyro = jp.array([1.0, 2.0, 3.0])
     observation = self.env._get_observation(
@@ -88,12 +93,49 @@ class JoystickTest(absltest.TestCase):
         jp.array(0.0),
     )
 
-    self.assertEqual(observation.shape, (41,))
-    np.testing.assert_allclose(observation[:32], command_history.flatten())
-    np.testing.assert_allclose(observation[32:35], gravity)
-    np.testing.assert_allclose(observation[35:38], 0.25 * gyro)
-    np.testing.assert_allclose(observation[38:40], jp.array([0.0, 1.0]))
-    self.assertAlmostEqual(float(observation[40]), 0.04)
+    self.assertEqual(observation.shape, (105,))
+    np.testing.assert_allclose(observation[:96], command_history.flatten())
+    np.testing.assert_allclose(observation[96:99], gravity)
+    np.testing.assert_allclose(observation[99:102], 0.25 * gyro)
+    np.testing.assert_allclose(observation[102:104], jp.array([0.0, 1.0]))
+    self.assertAlmostEqual(float(observation[104]), 0.04)
+
+  def test_imu_velocity_uses_site_position(self):
+    self.env._imu_site_id = 1
+    before = SimpleNamespace(site_xpos=jp.array([
+        [9.0, 9.0, 9.0],
+        [0.1, 0.2, 0.3],
+    ]))
+    after = SimpleNamespace(site_xpos=jp.array([
+        [8.0, 8.0, 8.0],
+        [0.14, 0.18, 0.31],
+    ]))
+
+    velocity = self.env._get_imu_linear_velocity_world(before, after)
+
+    np.testing.assert_allclose(
+        velocity,
+        jp.array([2.0, -1.0, 0.5]),
+        atol=1e-6,
+    )
+
+  def test_imu_signals_are_expressed_in_site_frame(self):
+    self.env._imu_site_id = 0
+    imu_xmat = jp.array([
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    data = SimpleNamespace(
+        qpos=jp.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        qvel=jp.array([0.0, 0.0, 0.0, 1.0, 2.0, 3.0]),
+        site_xmat=imu_xmat[None, ...],
+    )
+
+    gravity, gyro = self.env._get_imu_signals(data)
+
+    np.testing.assert_allclose(gravity, jp.array([0.0, 0.0, -1.0]))
+    np.testing.assert_allclose(gyro, jp.array([2.0, -1.0, 3.0]))
 
 
 if __name__ == '__main__':
