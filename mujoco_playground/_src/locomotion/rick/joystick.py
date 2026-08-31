@@ -98,6 +98,12 @@ def default_config() -> config_dict.ConfigDict:
         'foot_phase_reward_weight': 1.0,
         'swing_foot_height': 0.015,
         'foot_height_tracking_sigma': 2.5e-5,
+        # During each swing, move the foot 30 mm from behind to ahead of its
+        # nominal body-relative position.  At the target speed/frequency this
+        # roughly matches the distance the body travels during one stance.
+        'swing_foot_forward_reward_weight': 1.0,
+        'swing_foot_forward_distance': 0.030,
+        'swing_foot_forward_tracking_sigma': 1.0e-4,  # (10 mm)^2.
         'foot_slip_cost_weight': 20.0,
         'base_height_cost_weight': 0.10,
         'base_height_tracking_sigma': 4.0e-4,
@@ -205,6 +211,15 @@ class Joystick(mjx_env.MjxEnv):
         self._foot_height_tracking_sigma = (
             config.foot_height_tracking_sigma
         )
+        self._swing_foot_forward_reward_weight = (
+            config.swing_foot_forward_reward_weight
+        )
+        self._swing_foot_forward_distance = (
+            config.swing_foot_forward_distance
+        )
+        self._swing_foot_forward_tracking_sigma = (
+            config.swing_foot_forward_tracking_sigma
+        )
         self._foot_slip_cost_weight = config.foot_slip_cost_weight
         self._base_height_cost_weight = config.base_height_cost_weight
         self._base_height_tracking_sigma = (
@@ -241,18 +256,25 @@ class Joystick(mjx_env.MjxEnv):
             ),
         ])
 
+        # Robot convention: +X sideways, -Y forward, +Z up.
+        self._forward_world = jp.array([0.0, -1.0, 0.0])
+        self._forward_world_xy = jp.array([0.0, -1.0])
+
         self._default_pose = self._mjx_model.qpos0[7:]
         default_data = mujoco.MjData(self._mj_model)
         mujoco.mj_forward(self._mj_model, default_data)
         self._nominal_base_height = default_data.subtree_com[
             self._body_idx, 2
         ]
+        default_foot_offsets = (
+            jp.array(default_data.site_xpos)[self._feet_site_ids]
+            - jp.array(default_data.xpos[self._body_idx])
+        )
+        self._nominal_foot_forward_positions = (
+            default_foot_offsets @ self._forward_world
+        )
         self._ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
         self._ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
-
-        # Robot convention: +X sideways, -Y forward, +Z up.
-        self._forward_world = jp.array([0.0, -1.0, 0.0])
-        self._forward_world_xy = jp.array([0.0, -1.0])
 
     @property
     def xml_path(self) -> str:
@@ -444,6 +466,7 @@ class Joystick(mjx_env.MjxEnv):
         metrics = {
             'reward_velocity_tracking': zero,
             'reward_foot_phase': zero,
+            'reward_swing_foot_forward': zero,
             'reward_alive': zero,
             'cost_sideways_velocity': zero,
             'cost_yaw_rate': zero,
@@ -471,6 +494,10 @@ class Joystick(mjx_env.MjxEnv):
             'right_foot_height': zero,
             'desired_left_foot_height': zero,
             'desired_right_foot_height': zero,
+            'left_foot_forward_position': zero,
+            'right_foot_forward_position': zero,
+            'desired_left_foot_forward_position': zero,
+            'desired_right_foot_forward_position': zero,
         }
 
         return mjx_env.State(
@@ -647,6 +674,12 @@ class Joystick(mjx_env.MjxEnv):
             inv_quat,
         )
         uprightness = -gravity_local[2]
+        body_forward_world = math.rotate(self._forward_world, root_quat)
+        body_forward_xy = body_forward_world[:2]
+        body_forward_xy = body_forward_xy / jp.maximum(
+            jp.linalg.norm(body_forward_xy),
+            1e-6,
+        )
 
         com_before = data0.subtree_com[self._body_idx]
         com_after = data.subtree_com[self._body_idx]
@@ -682,6 +715,20 @@ class Joystick(mjx_env.MjxEnv):
             )
         )
 
+        # Track a fore-aft swing trajectory relative to the body.  Whole-body
+        # translation cannot satisfy this objective: the airborne foot must
+        # move from behind the torso to ahead of it before touchdown.
+        (
+            swing_foot_forward_reward,
+            foot_forward_positions,
+            desired_foot_forward_positions,
+        ) = self._get_swing_foot_forward_reward(
+            foot_positions_after,
+            data.xpos[self._body_idx],
+            body_forward_xy,
+            phase,
+        )
+
         foot_velocities_world = (
             foot_positions_after - foot_positions_before
         ) / self.dt
@@ -712,12 +759,6 @@ class Joystick(mjx_env.MjxEnv):
             * jp.sum(jp.square(root_angular_velocity_local[:2]))
         )
 
-        body_forward_world = math.rotate(self._forward_world, root_quat)
-        body_forward_xy = body_forward_world[:2]
-        body_forward_xy = body_forward_xy / jp.maximum(
-            jp.linalg.norm(body_forward_xy),
-            1e-6,
-        )
         heading_alignment = jp.dot(
             body_forward_xy,
             self._forward_world_xy,
@@ -760,6 +801,7 @@ class Joystick(mjx_env.MjxEnv):
         reward = (
             velocity_tracking_reward
             + foot_phase_reward
+            + swing_foot_forward_reward
             + healthy_reward
             - sideways_velocity_cost
             - yaw_rate_cost
@@ -823,6 +865,7 @@ class Joystick(mjx_env.MjxEnv):
         state.metrics.update(
             reward_velocity_tracking=velocity_tracking_reward,
             reward_foot_phase=foot_phase_reward,
+            reward_swing_foot_forward=swing_foot_forward_reward,
             reward_alive=healthy_reward,
             cost_sideways_velocity=-sideways_velocity_cost,
             cost_yaw_rate=-yaw_rate_cost,
@@ -850,6 +893,14 @@ class Joystick(mjx_env.MjxEnv):
             right_foot_height=foot_heights[1],
             desired_left_foot_height=desired_foot_heights[0],
             desired_right_foot_height=desired_foot_heights[1],
+            left_foot_forward_position=foot_forward_positions[0],
+            right_foot_forward_position=foot_forward_positions[1],
+            desired_left_foot_forward_position=(
+                desired_foot_forward_positions[0]
+            ),
+            desired_right_foot_forward_position=(
+                desired_foot_forward_positions[1]
+            ),
         )
 
         return state.replace(
@@ -1060,3 +1111,57 @@ class Joystick(mjx_env.MjxEnv):
         foot_phases = phase + jp.array([0.0, jp.pi])
         swing = jp.maximum(jp.sin(foot_phases), 0.0)
         return self._swing_foot_height * jp.square(swing)
+
+    def _desired_foot_forward_positions(
+        self,
+        phase: jp.ndarray,
+    ) -> jp.ndarray:
+        """Returns body-relative targets, from rear to front during swing."""
+        foot_phases = phase + jp.array([0.0, jp.pi])
+        return (
+            self._nominal_foot_forward_positions
+            - 0.5
+            * self._swing_foot_forward_distance
+            * jp.cos(foot_phases)
+        )
+
+    def _get_swing_foot_forward_reward(
+        self,
+        foot_positions_world: jp.ndarray,
+        body_position_world: jp.ndarray,
+        body_forward_xy: jp.ndarray,
+        phase: jp.ndarray,
+    ) -> tuple[jp.ndarray, jp.ndarray, jp.ndarray]:
+        """Rewards the swing foot for following a body-relative forward arc."""
+        foot_offsets_xy = (
+            foot_positions_world[:, :2] - body_position_world[:2]
+        )
+        foot_forward_positions = foot_offsets_xy @ body_forward_xy
+        desired_foot_forward_positions = (
+            self._desired_foot_forward_positions(phase)
+        )
+
+        foot_phases = phase + jp.array([0.0, jp.pi])
+        swing_weights = (jp.sin(foot_phases) > 0.0).astype(
+            foot_positions_world.dtype
+        )
+        swing_count = jp.sum(swing_weights)
+        tracking_error = jp.sum(
+            swing_weights
+            * jp.square(
+                foot_forward_positions - desired_foot_forward_positions
+            )
+        ) / jp.maximum(swing_count, 1.0)
+        reward = (
+            self._swing_foot_forward_reward_weight
+            * jp.minimum(swing_count, 1.0)
+            * jp.exp(
+                -tracking_error
+                / self._swing_foot_forward_tracking_sigma
+            )
+        )
+        return (
+            reward,
+            foot_forward_positions,
+            desired_foot_forward_positions,
+        )

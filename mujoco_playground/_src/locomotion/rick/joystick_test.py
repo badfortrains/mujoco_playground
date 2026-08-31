@@ -29,6 +29,7 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.command_history_length, 12)
     self.assertEqual(tuple(config.action_delay_range), (0, 2))
     self.assertEqual(config.joint_position_noise_scale, 0.03)
+    self.assertEqual(config.swing_foot_forward_distance, 0.030)
 
   def test_stationary_madgwick_update_stays_upright(self):
     identity = jp.array([1.0, 0.0, 0.0, 0.0])
@@ -99,6 +100,37 @@ class JoystickTest(absltest.TestCase):
     np.testing.assert_allclose(observation[99:102], 0.25 * gyro)
     np.testing.assert_allclose(observation[102:104], jp.array([0.0, 1.0]))
     self.assertAlmostEqual(float(observation[104]), 0.04)
+
+  def test_swing_foot_forward_reward_requires_body_relative_placement(self):
+    self.env._nominal_foot_forward_positions = jp.array([0.0, 0.0])
+    self.env._swing_foot_forward_distance = 0.030
+    self.env._swing_foot_forward_reward_weight = 1.0
+    self.env._swing_foot_forward_tracking_sigma = 1.0e-4
+    phase = jp.array(3.0 * jp.pi / 4.0)
+    desired = self.env._desired_foot_forward_positions(phase)
+    body_position = jp.array([0.0, -0.2, 0.1])
+    body_forward_xy = jp.array([0.0, -1.0])
+    correctly_placed_feet = jp.array([
+        [0.0, body_position[1] - desired[0], 0.01],
+        [0.0, body_position[1], 0.0],
+    ])
+
+    correct_reward, actual, _ = self.env._get_swing_foot_forward_reward(
+        correctly_placed_feet,
+        body_position,
+        body_forward_xy,
+        phase,
+    )
+    falling_reward, _, _ = self.env._get_swing_foot_forward_reward(
+        correctly_placed_feet,
+        body_position + jp.array([0.0, -0.02, 0.0]),
+        body_forward_xy,
+        phase,
+    )
+
+    self.assertAlmostEqual(float(correct_reward), 1.0, places=6)
+    self.assertAlmostEqual(float(actual[0]), float(desired[0]), places=6)
+    self.assertLess(float(falling_reward), 0.05)
 
   def test_imu_velocity_uses_site_position(self):
     self.env._imu_site_id = 1
