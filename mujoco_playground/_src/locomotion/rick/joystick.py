@@ -60,7 +60,7 @@ def default_config() -> config_dict.ConfigDict:
         'servo_speed_range': (4.0, 8.0),  # rad/s before voltage scaling.
         # Stiffness scales the XML position-servo kp.  Lower stiffness plus dry
         # joint friction produces load-dependent droop and a breakaway error.
-        'servo_stiffness_range': (0.5, 1),
+        'servo_stiffness_range': (1, 1),
         'servo_frictionloss_range': (0.010, 0.025),  # N m.
         # Command deadband is electronic; backlash is a stateful half-width at
         # the output.  A reversal traverses twice the sampled backlash value.
