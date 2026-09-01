@@ -37,9 +37,9 @@ def default_config() -> config_dict.ConfigDict:
         'impl': 'brax',
 
         # Policy command and gait parameters.
-        'target_velocity': 0.04,
+        'target_velocity': 0.06,
         'action_scale': 0.40,
-        'step_frequency': 0.68,
+        'step_frequency': 0.8,
 
         # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
@@ -66,7 +66,7 @@ def default_config() -> config_dict.ConfigDict:
         # the output.  A reversal traverses twice the sampled backlash value.
         'servo_deadband_range_us': (4.0, 12.0),
         'servo_backlash_range_us': (5.0, 20.0),
-        'action_delay_range': (0, 2),  # Controller frames, inclusive.
+        'action_delay_range': (0, 4),  # Controller frames, inclusive.
         'action_noise_scale': 0.01,
 
         # Effective sliding friction between the feet and floor.  Sample one
@@ -123,7 +123,7 @@ def default_config() -> config_dict.ConfigDict:
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
-        'swing_foot_forward_reward_weight': 1.0,
+        'swing_foot_forward_reward_weight': 0,
         'swing_foot_forward_distance': 0.030,
         'swing_foot_forward_tracking_sigma': 1.0e-4,  # (10 mm)^2.
         'foot_slip_cost_weight': 20.0,
