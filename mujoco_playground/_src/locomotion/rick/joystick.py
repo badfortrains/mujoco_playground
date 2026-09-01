@@ -69,6 +69,17 @@ def default_config() -> config_dict.ConfigDict:
         'action_delay_range': (0, 2),  # Controller frames, inclusive.
         'action_noise_scale': 0.01,
 
+        # Effective sliding friction between the feet and floor.  Sample one
+        # shared value per episode so the policy cannot rely on the nominal
+        # XML contact coefficient or on a single floor material.
+        'foot_friction_range': (0.20, 0.60),
+
+        # Shared local-frame offset applied to every non-world inertial frame.
+        # Because Rick's link frames are aligned in the nominal pose, this
+        # shifts the whole-robot COM by approximately the sampled offset while
+        # preserving the relative mass contribution of each link.
+        'center_of_mass_offset_scale': (0.005, 0.005, 0.003),  # m.
+
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
         'root_position_noise_scale': (0.002, 0.002, 0.001),  # m.
@@ -172,6 +183,10 @@ class Joystick(mjx_env.MjxEnv):
         self._action_delay_range = config.action_delay_range
         self._max_action_delay = int(config.action_delay_range[1])
         self._action_noise_scale = config.action_noise_scale
+        self._foot_friction_range = config.foot_friction_range
+        self._center_of_mass_offset_scale = jp.array(
+            config.center_of_mass_offset_scale
+        )
 
         self._root_position_noise_scale = jp.array(
             config.root_position_noise_scale
@@ -274,6 +289,36 @@ class Joystick(mjx_env.MjxEnv):
                 'right_foot_center',
             ),
         ])
+        self._foot_floor_pair_ids = jp.array([
+            mujoco.mj_name2id(
+                self._mj_model,
+                mujoco.mjtObj.mjOBJ_PAIR.value,
+                'left_foot_floor',
+            ),
+            mujoco.mj_name2id(
+                self._mj_model,
+                mujoco.mjtObj.mjOBJ_PAIR.value,
+                'right_foot_floor',
+            ),
+        ])
+        foot_contact_sensor_ids = [
+            mujoco.mj_name2id(
+                self._mj_model,
+                mujoco.mjtObj.mjOBJ_SENSOR.value,
+                'left_foot_floor_found',
+            ),
+            mujoco.mj_name2id(
+                self._mj_model,
+                mujoco.mjtObj.mjOBJ_SENSOR.value,
+                'right_foot_floor_found',
+            ),
+        ]
+        self._foot_contact_sensor_adrs = jp.array(
+            [
+                self._mj_model.sensor_adr[sensor_id]
+                for sensor_id in foot_contact_sensor_ids
+            ]
+        )
 
         # Robot convention: +X sideways, -Y forward, +Z up.
         self._forward_world = jp.array([0.0, -1.0, 0.0])
@@ -337,9 +382,11 @@ class Joystick(mjx_env.MjxEnv):
             servo_deadband_key,
             servo_backlash_key,
             action_delay_key,
+            foot_friction_key,
+            center_of_mass_key,
             initial_gyro_key,
             step_key,
-        ) = jax.random.split(rng, 22)
+        ) = jax.random.split(rng, 24)
 
         qpos = self._mjx_model.qpos0
         root_position_noise = jax.random.uniform(
@@ -451,6 +498,17 @@ class Joystick(mjx_env.MjxEnv):
             minval=int(self._action_delay_range[0]),
             maxval=int(self._action_delay_range[1]) + 1,
         )
+        foot_friction = self._sample_uniform(
+            foot_friction_key,
+            self._foot_friction_range,
+            (),
+        )
+        center_of_mass_offset = jax.random.uniform(
+            center_of_mass_key,
+            (3,),
+            minval=-self._center_of_mass_offset_scale,
+            maxval=self._center_of_mass_offset_scale,
+        )
 
         motor_targets = jp.clip(
             self._default_pose + servo_center_offset,
@@ -464,7 +522,12 @@ class Joystick(mjx_env.MjxEnv):
             qvel=qvel,
             ctrl=motor_targets,
         )
-        data = mjx.forward(self._mjx_model, data)
+        reset_model = self._mjx_model.tree_replace({
+            'body_ipos': self._body_ipos_with_com_offset(
+                center_of_mass_offset
+            ),
+        })
+        data = mjx.forward(reset_model, data)
 
         phase = jax.random.uniform(
             phase_key,
@@ -549,6 +612,12 @@ class Joystick(mjx_env.MjxEnv):
             'right_foot_forward_position': zero,
             'desired_left_foot_forward_position': zero,
             'desired_right_foot_forward_position': zero,
+            'left_foot_contact': zero,
+            'right_foot_contact': zero,
+            'foot_friction': foot_friction,
+            'center_of_mass_offset_x': center_of_mass_offset[0],
+            'center_of_mass_offset_y': center_of_mass_offset[1],
+            'center_of_mass_offset_z': center_of_mass_offset[2],
         }
 
         return mjx_env.State(
@@ -575,6 +644,8 @@ class Joystick(mjx_env.MjxEnv):
                 'servo_backlash': servo_backlash,
                 'servo_output_target': servo_output_target,
                 'action_delay': action_delay,
+                'foot_friction': foot_friction,
+                'center_of_mass_offset': center_of_mass_offset,
                 'phase': phase,
                 'imu_quat': imu_quat,
                 'previous_imu_velocity_world': jp.zeros((3,)),
@@ -726,6 +797,15 @@ class Joystick(mjx_env.MjxEnv):
         dof_frictionloss = self._mjx_model.dof_frictionloss.at[
             self._actuated_dof_ids
         ].set(state.info['servo_frictionloss'])
+        pair_friction = self._mjx_model.pair_friction.at[
+            self._foot_floor_pair_ids, :2
+        ].set(jp.full(
+            (self._foot_floor_pair_ids.shape[0], 2),
+            state.info['foot_friction'],
+        ))
+        body_ipos = self._body_ipos_with_com_offset(
+            state.info['center_of_mass_offset']
+        )
         step_model = self._mjx_model.tree_replace({
             'actuator_gainprm': actuator_gainprm,
             'actuator_biasprm': actuator_biasprm,
@@ -734,6 +814,8 @@ class Joystick(mjx_env.MjxEnv):
                 * state.info['servo_strength'][:, None]
             ),
             'dof_frictionloss': dof_frictionloss,
+            'pair_friction': pair_friction,
+            'body_ipos': body_ipos,
         })
         data = mjx_env.step(
             step_model,
@@ -813,18 +895,13 @@ class Joystick(mjx_env.MjxEnv):
         foot_velocities_world = (
             foot_positions_after - foot_positions_before
         ) / self.dt
-        stance_weights = (
-            desired_foot_heights <= 1e-6
-        ).astype(foot_heights.dtype)
-        foot_slip_cost = (
-            self._foot_slip_cost_weight
-            * jp.sum(
-                stance_weights
-                * jp.sum(
-                    jp.square(foot_velocities_world[:, :2]),
-                    axis=1,
-                )
-            )
+        foot_contacts = (
+            data.sensordata[self._foot_contact_sensor_adrs] > 0
+        )
+        foot_slip_cost = self._get_foot_slip_cost(
+            foot_velocities_world,
+            desired_foot_heights,
+            foot_contacts,
         )
 
         # These global quantities shape training but never enter observation.
@@ -857,9 +934,13 @@ class Joystick(mjx_env.MjxEnv):
             * jp.square(velocity_world[2])
         )
         base_height = data.subtree_com[self._body_idx, 2]
+        target_base_height = (
+            self._nominal_base_height
+            + state.info['center_of_mass_offset'][2]
+        )
         base_height_cost = (
             self._base_height_cost_weight
-            * jp.square(base_height - self._nominal_base_height)
+            * jp.square(base_height - target_base_height)
             / self._base_height_tracking_sigma
         )
         energy_cost = (
@@ -982,6 +1063,18 @@ class Joystick(mjx_env.MjxEnv):
             desired_right_foot_forward_position=(
                 desired_foot_forward_positions[1]
             ),
+            left_foot_contact=foot_contacts[0].astype(jp.float32),
+            right_foot_contact=foot_contacts[1].astype(jp.float32),
+            foot_friction=state.info['foot_friction'],
+            center_of_mass_offset_x=(
+                state.info['center_of_mass_offset'][0]
+            ),
+            center_of_mass_offset_y=(
+                state.info['center_of_mass_offset'][1]
+            ),
+            center_of_mass_offset_z=(
+                state.info['center_of_mass_offset'][2]
+            ),
         )
 
         return state.replace(
@@ -1002,6 +1095,33 @@ class Joystick(mjx_env.MjxEnv):
                 'previous_imu_velocity_world': imu_velocity_world,
                 'rng': step_key,
             },
+        )
+
+    def _get_foot_slip_cost(
+        self,
+        foot_velocities_world: jp.ndarray,
+        desired_foot_heights: jp.ndarray,
+        foot_contacts: jp.ndarray,
+    ) -> jp.ndarray:
+        """Penalizes tangential velocity only for contacting stance feet."""
+        stance_contacts = (
+            (desired_foot_heights <= 1e-6) & foot_contacts
+        ).astype(foot_velocities_world.dtype)
+        tangential_speed_squared = jp.sum(
+            jp.square(foot_velocities_world[:, :2]),
+            axis=1,
+        )
+        return self._foot_slip_cost_weight * jp.sum(
+            stance_contacts * tangential_speed_squared
+        )
+
+    def _body_ipos_with_com_offset(
+        self,
+        center_of_mass_offset: jp.ndarray,
+    ) -> jp.ndarray:
+        """Applies a shared COM offset without modifying the world body."""
+        return self._mjx_model.body_ipos.at[1:].add(
+            center_of_mass_offset
         )
 
     def _get_observation(

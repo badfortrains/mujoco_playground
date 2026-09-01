@@ -28,6 +28,11 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.step_frequency, 0.68)
     self.assertEqual(config.command_history_length, 12)
     self.assertEqual(tuple(config.action_delay_range), (0, 2))
+    self.assertEqual(tuple(config.foot_friction_range), (0.20, 0.60))
+    self.assertEqual(
+        tuple(config.center_of_mass_offset_scale),
+        (0.005, 0.005, 0.003),
+    )
     self.assertEqual(tuple(config.servo_stiffness_range), (0.25, 0.80))
     self.assertEqual(
         tuple(config.servo_frictionloss_range), (0.010, 0.025)
@@ -36,6 +41,58 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.action_noise_scale, 0.01)
     self.assertEqual(config.joint_position_noise_scale, 0.03)
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
+
+  def test_foot_slip_cost_requires_stance_and_contact(self):
+    self.env._foot_slip_cost_weight = 20.0
+    foot_velocities = jp.array([
+        [0.1, 0.2, 3.0],
+        [0.3, 0.4, 5.0],
+    ])
+    desired_heights = jp.array([0.0, 0.0])
+
+    cost = self.env._get_foot_slip_cost(
+        foot_velocities,
+        desired_heights,
+        jp.array([True, False]),
+    )
+    self.assertAlmostEqual(float(cost), 1.0, places=6)
+
+    no_contact_cost = self.env._get_foot_slip_cost(
+        foot_velocities,
+        desired_heights,
+        jp.array([False, False]),
+    )
+    self.assertEqual(float(no_contact_cost), 0.0)
+
+    swing_cost = self.env._get_foot_slip_cost(
+        foot_velocities,
+        jp.array([0.01, 0.01]),
+        jp.array([True, True]),
+    )
+    self.assertEqual(float(swing_cost), 0.0)
+
+  def test_com_offset_preserves_world_body(self):
+    self.env._mjx_model = SimpleNamespace(
+        body_ipos=jp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+        ])
+    )
+
+    body_ipos = self.env._body_ipos_with_com_offset(
+        jp.array([0.1, -0.2, 0.3])
+    )
+
+    np.testing.assert_allclose(body_ipos[0], jp.zeros(3))
+    np.testing.assert_allclose(
+        body_ipos[1:],
+        jp.array([
+            [1.1, 1.8, 3.3],
+            [4.1, 4.8, 6.3],
+        ]),
+        atol=1e-6,
+    )
 
   def test_servo_backlash_absorbs_small_changes_and_reversals(self):
     backlash = jp.array([0.1])
