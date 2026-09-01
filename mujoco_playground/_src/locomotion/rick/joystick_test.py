@@ -28,8 +28,39 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.step_frequency, 0.68)
     self.assertEqual(config.command_history_length, 12)
     self.assertEqual(tuple(config.action_delay_range), (0, 2))
+    self.assertEqual(tuple(config.servo_stiffness_range), (0.25, 0.80))
+    self.assertEqual(
+        tuple(config.servo_frictionloss_range), (0.010, 0.025)
+    )
+    self.assertEqual(tuple(config.servo_backlash_range_us), (10.0, 30.0))
+    self.assertEqual(config.action_noise_scale, 0.01)
     self.assertEqual(config.joint_position_noise_scale, 0.03)
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
+
+  def test_servo_backlash_absorbs_small_changes_and_reversals(self):
+    backlash = jp.array([0.1])
+    output = jp.array([0.0])
+
+    output = self.env._apply_servo_backlash(
+        output, jp.array([0.05]), backlash
+    )
+    np.testing.assert_allclose(output, jp.array([0.0]))
+
+    output = self.env._apply_servo_backlash(
+        output, jp.array([0.25]), backlash
+    )
+    np.testing.assert_allclose(output, jp.array([0.15]))
+
+    # Reversing by less than the full 2 * backlash gap does not move output.
+    output = self.env._apply_servo_backlash(
+        output, jp.array([0.10]), backlash
+    )
+    np.testing.assert_allclose(output, jp.array([0.15]))
+
+    output = self.env._apply_servo_backlash(
+        output, jp.array([-0.10]), backlash
+    )
+    np.testing.assert_allclose(output, jp.array([0.0]))
 
   def test_stationary_madgwick_update_stays_upright(self):
     identity = jp.array([1.0, 0.0, 0.0, 0.0])

@@ -52,11 +52,22 @@ def default_config() -> config_dict.ConfigDict:
         'servo_response_range': (0.20, 0.45),
         'servo_center_offset_scale_us': 20.0,
         'servo_gain_range': (0.90, 1.10),
-        'servo_strength_range': (0.80, 1.20),
-        'servo_speed_range': (4.0, 10.0),  # rad/s under load.
-        'servo_deadband_range_us': (5.0, 20.0),
+        # A shared scale captures battery-voltage variation.  It affects all
+        # servo speed and torque limits together, while the other ranges retain
+        # servo-to-servo variation.
+        'servo_voltage_scale_range': (0.85, 1.00),
+        'servo_strength_range': (0.85, 1.10),
+        'servo_speed_range': (4.0, 8.0),  # rad/s before voltage scaling.
+        # Stiffness scales the XML position-servo kp.  Lower stiffness plus dry
+        # joint friction produces load-dependent droop and a breakaway error.
+        'servo_stiffness_range': (0.25, 0.80),
+        'servo_frictionloss_range': (0.010, 0.025),  # N m.
+        # Command deadband is electronic; backlash is a stateful half-width at
+        # the output.  A reversal traverses twice the sampled backlash value.
+        'servo_deadband_range_us': (4.0, 12.0),
+        'servo_backlash_range_us': (10.0, 30.0),
         'action_delay_range': (0, 2),  # Controller frames, inclusive.
-        'action_noise_scale': 0.03,
+        'action_noise_scale': 0.01,
 
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
@@ -147,9 +158,17 @@ class Joystick(mjx_env.MjxEnv):
             config.servo_center_offset_scale_us
         )
         self._servo_gain_range = config.servo_gain_range
+        self._servo_voltage_scale_range = (
+            config.servo_voltage_scale_range
+        )
         self._servo_strength_range = config.servo_strength_range
         self._servo_speed_range = config.servo_speed_range
+        self._servo_stiffness_range = config.servo_stiffness_range
+        self._servo_frictionloss_range = (
+            config.servo_frictionloss_range
+        )
         self._servo_deadband_range_us = config.servo_deadband_range_us
+        self._servo_backlash_range_us = config.servo_backlash_range_us
         self._action_delay_range = config.action_delay_range
         self._max_action_delay = int(config.action_delay_range[1])
         self._action_noise_scale = config.action_noise_scale
@@ -275,6 +294,10 @@ class Joystick(mjx_env.MjxEnv):
         )
         self._ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
         self._ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
+        actuator_joint_ids = self._mj_model.actuator_trnid[:, 0]
+        self._actuated_dof_ids = jp.array(
+            self._mj_model.jnt_dofadr[actuator_joint_ids]
+        )
 
     @property
     def xml_path(self) -> str:
@@ -305,14 +328,18 @@ class Joystick(mjx_env.MjxEnv):
             gyro_bias_key,
             servo_center_key,
             servo_gain_key,
+            servo_voltage_key,
             servo_strength_key,
             servo_speed_key,
+            servo_stiffness_key,
+            servo_frictionloss_key,
             servo_response_key,
             servo_deadband_key,
+            servo_backlash_key,
             action_delay_key,
             initial_gyro_key,
             step_key,
-        ) = jax.random.split(rng, 18)
+        ) = jax.random.split(rng, 22)
 
         qpos = self._mjx_model.qpos0
         root_position_noise = jax.random.uniform(
@@ -375,14 +402,29 @@ class Joystick(mjx_env.MjxEnv):
             self._servo_gain_range,
             (self._action_dim,),
         )
-        servo_strength = self._sample_uniform(
+        servo_voltage_scale = self._sample_uniform(
+            servo_voltage_key,
+            self._servo_voltage_scale_range,
+            (),
+        )
+        servo_strength = servo_voltage_scale * self._sample_uniform(
             servo_strength_key,
             self._servo_strength_range,
             (self._action_dim,),
         )
-        servo_speed = self._sample_uniform(
+        servo_speed = servo_voltage_scale * self._sample_uniform(
             servo_speed_key,
             self._servo_speed_range,
+            (self._action_dim,),
+        )
+        servo_stiffness = self._sample_uniform(
+            servo_stiffness_key,
+            self._servo_stiffness_range,
+            (self._action_dim,),
+        )
+        servo_frictionloss = self._sample_uniform(
+            servo_frictionloss_key,
+            self._servo_frictionloss_range,
             (self._action_dim,),
         )
         servo_response = self._sample_uniform(
@@ -394,6 +436,14 @@ class Joystick(mjx_env.MjxEnv):
             servo_deadband_key,
             self._servo_deadband_range_us,
             (self._action_dim,),
+        )
+        servo_backlash = (
+            self._sample_uniform(
+                servo_backlash_key,
+                self._servo_backlash_range_us,
+                (self._action_dim,),
+            )
+            / _SERVO_US_PER_RADIAN
         )
         action_delay = jax.random.randint(
             action_delay_key,
@@ -427,6 +477,7 @@ class Joystick(mjx_env.MjxEnv):
         )
         accepted_servo_command = jp.zeros((self._action_dim,))
         servo_action = jp.zeros((self._action_dim,))
+        servo_output_target = motor_targets
 
         accelerometer_bias = jax.random.uniform(
             accelerometer_bias_key,
@@ -514,10 +565,15 @@ class Joystick(mjx_env.MjxEnv):
                 'motor_targets': motor_targets,
                 'servo_center_offset': servo_center_offset,
                 'servo_gain': servo_gain,
+                'servo_voltage_scale': servo_voltage_scale,
                 'servo_strength': servo_strength,
                 'servo_speed': servo_speed,
+                'servo_stiffness': servo_stiffness,
+                'servo_frictionloss': servo_frictionloss,
                 'servo_response': servo_response,
                 'servo_deadband_us': servo_deadband_us,
+                'servo_backlash': servo_backlash,
+                'servo_output_target': servo_output_target,
                 'action_delay': action_delay,
                 'phase': phase,
                 'imu_quat': imu_quat,
@@ -643,21 +699,46 @@ class Joystick(mjx_env.MjxEnv):
             -max_target_delta,
             max_target_delta,
         )
+        # Stateful output-side play.  Small changes and direction reversals are
+        # first absorbed by gear lash instead of moving the simulated joint.
+        servo_output_target = self._apply_servo_backlash(
+            state.info['servo_output_target'],
+            motor_targets,
+            state.info['servo_backlash'],
+        )
 
         new_command_history = jp.roll(command_history, shift=-1, axis=0)
         new_command_history = new_command_history.at[-1].set(command)
 
         data0 = state.data
+        stiffness = state.info['servo_stiffness']
+        actuator_gainprm = self._mjx_model.actuator_gainprm.at[:, 0].set(
+            self._mjx_model.actuator_gainprm[:, 0] * stiffness
+        )
+        actuator_biasprm = self._mjx_model.actuator_biasprm.at[:, 1].set(
+            self._mjx_model.actuator_biasprm[:, 1] * stiffness
+        )
+        # Scale kv with sqrt(kp) to approximately preserve damping ratio.
+        actuator_biasprm = actuator_biasprm.at[:, 2].set(
+            self._mjx_model.actuator_biasprm[:, 2]
+            * jp.sqrt(stiffness)
+        )
+        dof_frictionloss = self._mjx_model.dof_frictionloss.at[
+            self._actuated_dof_ids
+        ].set(state.info['servo_frictionloss'])
         step_model = self._mjx_model.tree_replace({
+            'actuator_gainprm': actuator_gainprm,
+            'actuator_biasprm': actuator_biasprm,
             'actuator_forcerange': (
                 self._mjx_model.actuator_forcerange
                 * state.info['servo_strength'][:, None]
             ),
+            'dof_frictionloss': dof_frictionloss,
         })
         data = mjx_env.step(
             step_model,
             data0,
-            motor_targets,
+            servo_output_target,
             self.n_substeps,
         )
 
@@ -915,6 +996,7 @@ class Joystick(mjx_env.MjxEnv):
                 'accepted_servo_command': accepted_servo_command,
                 'servo_action': servo_action,
                 'motor_targets': motor_targets,
+                'servo_output_target': servo_output_target,
                 'phase': phase,
                 'imu_quat': imu_quat,
                 'previous_imu_velocity_world': imu_velocity_world,
@@ -962,6 +1044,19 @@ class Joystick(mjx_env.MjxEnv):
             shape,
             minval=value_range[0],
             maxval=value_range[1],
+        )
+
+    @staticmethod
+    def _apply_servo_backlash(
+        previous_output_target: jp.ndarray,
+        motor_target: jp.ndarray,
+        backlash: jp.ndarray,
+    ) -> jp.ndarray:
+        """Applies a stateful play operator with the given half-width."""
+        return jp.clip(
+            previous_output_target,
+            motor_target - backlash,
+            motor_target + backlash,
         )
 
     @staticmethod
