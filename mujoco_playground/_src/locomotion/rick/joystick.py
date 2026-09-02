@@ -37,9 +37,9 @@ def default_config() -> config_dict.ConfigDict:
         'impl': 'brax',
 
         # Policy command and gait parameters.
-        'target_velocity': 0.06,
+        'target_velocity': 0.08,
         'action_scale': 0.40,
-        'step_frequency': 0.8,
+        'step_frequency': 1,
 
         # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
@@ -118,7 +118,7 @@ def default_config() -> config_dict.ConfigDict:
 
         # Gait shaping copied from the successful simple task.
         'foot_phase_reward_weight': 1.0,
-        'swing_foot_height': 0.025,
+        'swing_foot_height': 0.015,
         'foot_height_tracking_sigma': 2.5e-5,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
