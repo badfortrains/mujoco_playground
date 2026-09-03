@@ -37,9 +37,9 @@ def default_config() -> config_dict.ConfigDict:
         'impl': 'brax',
 
         # Policy command and gait parameters.
-        'target_velocity': 0.08,
+        'target_velocity': 0.068,
         'action_scale': 0.40,
-        'step_frequency': 1,
+        'step_frequency': 0.8,
 
         # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
