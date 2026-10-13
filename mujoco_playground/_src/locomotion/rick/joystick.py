@@ -118,12 +118,12 @@ def default_config() -> config_dict.ConfigDict:
 
         # Gait shaping copied from the successful simple task.
         'foot_phase_reward_weight': 1.0,
-        'swing_foot_height': 0.015,
-        'foot_height_tracking_sigma': 2.5e-5,
+        'swing_foot_height': 0.025,
+        'foot_height_tracking_sigma': 5.0e-5,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
-        'swing_foot_forward_reward_weight': 0,
+        'swing_foot_forward_reward_weight': 1,
         'swing_foot_forward_distance': 0.030,
         'swing_foot_forward_tracking_sigma': 1.0e-4,  # (10 mm)^2.
         'foot_slip_cost_weight': 20.0,
