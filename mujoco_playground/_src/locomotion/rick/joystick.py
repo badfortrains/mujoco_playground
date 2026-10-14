@@ -39,7 +39,7 @@ def default_config() -> config_dict.ConfigDict:
         # Policy command and gait parameters.
         'target_velocity': 0.068,
         'action_scale': 0.40,
-        'step_frequency': 0.8,
+        'step_frequency': 1.2,
 
         # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
@@ -104,8 +104,8 @@ def default_config() -> config_dict.ConfigDict:
         'velocity_tracking_weight': 2.0,
         'tracking_sigma': 0.0025,
         'sideways_velocity_cost_weight': 0.05,
-        'yaw_rate_cost_weight': 0.20,
-        'heading_cost_weight': 0.50,
+        'yaw_rate_cost_weight': 1.0,
+        'heading_cost_weight': 4.0,
         'orientation_cost_weight': 0.75,
         'roll_pitch_rate_cost_weight': 0.05,
         'action_rate_cost_weight': 0.05,
@@ -119,7 +119,7 @@ def default_config() -> config_dict.ConfigDict:
         # Gait shaping copied from the successful simple task.
         'foot_phase_reward_weight': 1.0,
         'swing_foot_height': 0.025,
-        'foot_height_tracking_sigma': 5.0e-5,
+        'foot_height_tracking_sigma': 2.0e-5,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
@@ -127,7 +127,7 @@ def default_config() -> config_dict.ConfigDict:
         'swing_foot_forward_distance': 0.030,
         'swing_foot_forward_tracking_sigma': 1.0e-4,  # (10 mm)^2.
         'foot_slip_cost_weight': 20.0,
-        'base_height_cost_weight': 0.10,
+        'base_height_cost_weight': 0.0,
         'base_height_tracking_sigma': 4.0e-4,
         'energy_cost_weight': 0.005,
 
@@ -867,7 +867,7 @@ class Joystick(mjx_env.MjxEnv):
         foot_positions_before = data0.site_xpos[self._feet_site_ids]
         foot_positions_after = data.site_xpos[self._feet_site_ids]
         foot_heights = jp.maximum(foot_positions_after[:, 2], 0.0)
-        foot_height_error = jp.mean(
+        foot_height_error = jp.sum(
             jp.square(foot_heights - desired_foot_heights)
         )
         foot_phase_reward = (
@@ -1347,7 +1347,6 @@ class Joystick(mjx_env.MjxEnv):
         body_forward_xy: jp.ndarray,
         phase: jp.ndarray,
     ) -> tuple[jp.ndarray, jp.ndarray, jp.ndarray]:
-        """Rewards the swing foot for following a body-relative forward arc."""
         foot_offsets_xy = (
             foot_positions_world[:, :2] - body_position_world[:2]
         )
@@ -1355,25 +1354,13 @@ class Joystick(mjx_env.MjxEnv):
         desired_foot_forward_positions = (
             self._desired_foot_forward_positions(phase)
         )
-
-        foot_phases = phase + jp.array([0.0, jp.pi])
-        swing_weights = (jp.sin(foot_phases) > 0.0).astype(
-            foot_positions_world.dtype
-        )
-        swing_count = jp.sum(swing_weights)
+        # Track BOTH stance and swing feet so the legs must alternate symmetrically!
         tracking_error = jp.sum(
-            swing_weights
-            * jp.square(
-                foot_forward_positions - desired_foot_forward_positions
-            )
-        ) / jp.maximum(swing_count, 1.0)
+            jp.square(foot_forward_positions - desired_foot_forward_positions)
+        )
         reward = (
             self._swing_foot_forward_reward_weight
-            * jp.minimum(swing_count, 1.0)
-            * jp.exp(
-                -tracking_error
-                / self._swing_foot_forward_tracking_sigma
-            )
+            * jp.exp(-tracking_error / self._swing_foot_forward_tracking_sigma)
         )
         return (
             reward,
