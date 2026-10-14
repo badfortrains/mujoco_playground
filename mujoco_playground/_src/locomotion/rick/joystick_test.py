@@ -45,18 +45,18 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.swing_foot_height, 0.025)
     self.assertEqual(config.foot_height_tracking_sigma, 1.0e-4)
     self.assertEqual(config.swing_airborne_reward_weight, 1.0)
-    self.assertEqual(config.swing_foot_clearance, 0.012)
+    self.assertEqual(config.swing_foot_clearance, 0.005)
 
   def test_airborne_reward_requires_contact_release_and_both_ends_clear(self):
     self.env._swing_airborne_reward_weight = 1.0
-    self.env._swing_foot_clearance = 0.012
+    self.env._swing_foot_clearance = joystick.default_config().swing_foot_clearance
     reward = jax.jit(self.env._get_swing_airborne_reward)
     phase = jp.array(jp.pi / 2)
-    clear = jp.array([0.012, 0.0])
+    clear = jp.array([0.005, 0.0])
     airborne = jp.array([False, True])
     self.assertAlmostEqual(float(reward(phase, airborne, clear, clear)), 1.0)
     self.assertEqual(float(reward(phase, jp.array([True, True]), clear, clear)), 0.0)
-    for toe, heel in [(0.0, 0.012), (0.012, 0.0), (0.012, -0.001)]:
+    for toe, heel in [(0.0, 0.005), (0.005, 0.0), (0.005, -0.001)]:
       self.assertEqual(float(reward(
           phase, airborne, jp.array([toe, 0.0]), jp.array([heel, 0.0])
       )), 0.0)
@@ -69,7 +69,7 @@ class JoystickTest(absltest.TestCase):
       for offset in (-1e-4, 0.0, 1e-4):
         self.assertLess(float(reward(
             jp.array(boundary + offset), jp.array([False, False]),
-            jp.ones(2) * 0.012, jp.ones(2) * 0.012,
+            jp.ones(2) * 0.005, jp.ones(2) * 0.005,
         )), 1e-7)
 
   def test_sole_corners_follow_loaded_mesh_and_box_transforms(self):

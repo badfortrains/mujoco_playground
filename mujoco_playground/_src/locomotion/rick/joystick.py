@@ -124,10 +124,10 @@ def default_config() -> config_dict.ConfigDict:
         # tolerance so partial lifts still earn useful reward.
         'foot_height_tracking_sigma': 1.0e-4,
         # Extra credit only for a genuinely airborne swing foot.  The lowest
-        # sole corner must clear 12 mm for full credit; the center-height
+        # sole corner must clear 5 mm for full credit; the center-height
         # tracking term above still asks for a 25 mm peak.
         'swing_airborne_reward_weight': 1.0,
-        'swing_foot_clearance': 0.012,
+        'swing_foot_clearance': 0.005,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
@@ -258,7 +258,7 @@ class Joystick(mjx_env.MjxEnv):
         self._swing_airborne_reward_weight = config.get(
             'swing_airborne_reward_weight', 0.0
         )
-        self._swing_foot_clearance = config.get('swing_foot_clearance', 0.012)
+        self._swing_foot_clearance = config.get('swing_foot_clearance', 0.005)
         if self._swing_foot_clearance <= 0:
             raise ValueError('swing_foot_clearance must be positive')
         self._swing_foot_forward_reward_weight = (

@@ -73,7 +73,7 @@ penetration. These measurements distinguish a raised center from a foot rocking
 on an edge. They appear in the height plots and first in rscope's metric list.
 
 New Rick training configs enable `swing_airborne_reward_weight=1.0` and
-`swing_foot_clearance=0.012` (meters). The reward is the squared positive sine of
+`swing_foot_clearance=0.005` (meters). The reward is the squared positive sine of
 the swing phase, multiplied by no-contact and by the lowest sole corner's
 clearance divided by the target, clipped to [0, 1]. It peaks at mid-swing and
 vanishes at phase boundaries. The separate 25 mm center-height reward remains.
