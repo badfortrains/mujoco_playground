@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Joystick task for Unitree G1."""
 
 from typing import Any, Dict, Optional, Union
@@ -358,7 +358,7 @@ class Joystick(g1_base.G1Env):
     qvel = state.data.qvel
     qvel = qvel.at[:2].set(push * push_magnitude + qvel[:2])
     data = state.data.replace(qvel=qvel)
-    state = state.replace(data=data)
+    state = state.replace(data=data)  # pyrefly: ignore[missing-attribute]
 
     motor_targets = self._default_pose + action * self._config.action_scale
     data = mjx_env.step(
@@ -419,21 +419,30 @@ class Joystick(g1_base.G1Env):
       state.metrics[f"reward/{k}"] = v
     state.metrics["swing_peak"] = jp.mean(state.info["swing_peak"])
 
-    done = done.astype(reward.dtype)
-    state = state.replace(data=data, obs=obs, reward=reward, done=done)
+    done = done.astype(reward.dtype)  # pyrefly: ignore[missing-attribute]
+    state = state.replace(data=data, obs=obs, reward=reward, done=done)  # pyrefly: ignore[missing-attribute]
     return state
 
   def _get_termination(self, data: mjx.Data) -> jax.Array:
     fall_termination = self.get_gravity(data, "torso")[-1] < 0.0
-    contact_termination = data.sensordata[
-        self._mj_model.sensor_adr[self._right_foot_left_foot_found_sensor]
-    ] > 0
-    contact_termination |= data.sensordata[
-        self._mj_model.sensor_adr[self._left_foot_right_shin_found_sensor]
-    ] > 0
-    contact_termination |= data.sensordata[
-        self._mj_model.sensor_adr[self._right_foot_left_shin_found_sensor]
-    ] > 0
+    contact_termination = (
+        data.sensordata[
+            self._mj_model.sensor_adr[self._right_foot_left_foot_found_sensor]
+        ]
+        > 0
+    )
+    contact_termination |= (
+        data.sensordata[
+            self._mj_model.sensor_adr[self._left_foot_right_shin_found_sensor]
+        ]
+        > 0
+    )
+    contact_termination |= (
+        data.sensordata[
+            self._mj_model.sensor_adr[self._right_foot_left_shin_found_sensor]
+        ]
+        > 0
+    )
     return (
         fall_termination
         | contact_termination

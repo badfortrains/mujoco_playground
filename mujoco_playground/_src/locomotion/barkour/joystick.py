@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Joystick environment for Barkour."""
 
 from typing import Any, Dict, Optional, Union
@@ -149,8 +149,9 @@ class Joystick(mjx_env.MjxEnv):
     mj_model.actuator_biasprm[:, 1] = -35.0
 
     self._mj_model = mj_model
-    self._mj_model.opt.timestep = config.sim_dt
-    self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(
+        self._mj_model, impl=self._config.impl
+    )
     self._post_init()
 
   def _post_init(self) -> None:
@@ -253,7 +254,9 @@ class Joystick(mjx_env.MjxEnv):
         self.mjx_model, state.data, motor_targets, self.n_substeps
     )
 
-    obs = self._get_obs(data, state.info, state.obs, noise_rng)
+    obs = self._get_obs(
+        data, state.info, state.obs, noise_rng  # pyrefly: ignore[bad-argument-type]
+    )
     joint_angles = data.qpos[7:]
     joint_vel = data.qvel[6:]
     torso_z = data.xpos[self._torso_body_id, -1]
@@ -304,7 +307,9 @@ class Joystick(mjx_env.MjxEnv):
       state.metrics[f"reward/{k}"] = v
 
     done = jp.float32(done)
-    state = state.replace(data=data, obs=obs, reward=reward, done=done)
+    state = state.replace(  # pyrefly: ignore[missing-attribute]
+        data=data, obs=obs, reward=reward, done=done
+    )
     return state
 
   def _get_obs(

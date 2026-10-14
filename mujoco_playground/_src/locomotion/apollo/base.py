@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Base classes for Apollo."""
 
 from typing import Any, Dict, Optional, Union
@@ -22,9 +22,10 @@ import jax.numpy as jp
 from ml_collections import config_dict
 import mujoco
 from mujoco import mjx
+import numpy as np
+
 from mujoco_playground._src import mjx_env
 from mujoco_playground._src.locomotion.apollo import constants as consts
-import numpy as np
 
 
 def get_assets() -> Dict[str, bytes]:
@@ -60,7 +61,9 @@ class ApolloEnv(mjx_env.MjxEnv):
     self._mj_model.vis.global_.offwidth = 3840
     self._mj_model.vis.global_.offheight = 2160
 
-    self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(
+        self._mj_model, impl=self._config.impl
+    )
     self._xml_path = xml_path
 
     self._init_q = jp.array(self._mj_model.keyframe("knees_bent").qpos)

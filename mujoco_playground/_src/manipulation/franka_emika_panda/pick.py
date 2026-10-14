@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Bring a box to a target and orientation."""
 
 from typing import Any, Dict, Optional, Union
@@ -21,10 +21,11 @@ import jax.numpy as jp
 from ml_collections import config_dict
 from mujoco import mjx
 from mujoco.mjx._src import math
+import numpy as np
+
 from mujoco_playground._src import mjx_env
 from mujoco_playground._src.manipulation.franka_emika_panda import panda
 from mujoco_playground._src.mjx_env import State  # pylint: disable=g-importing-member
-import numpy as np
 
 
 def default_config() -> config_dict.ConfigDict:
@@ -47,7 +48,7 @@ def default_config() -> config_dict.ConfigDict:
               robot_target_qpos=0.3,
           )
       ),
-      impl='warp',
+      impl="warp",
       naconmax=24 * 2048,
       naccdmax=24 * 2048,
       njmax=128,
@@ -150,7 +151,9 @@ class PandaPickCube(panda.PandaBase):
     info = {"rng": rng, "target_pos": target_pos, "reached_box": 0.0}
     obs = self._get_obs(data, info)
     reward, done = jp.zeros(2)
-    state = State(data, obs, reward, done, metrics, info)
+    state = State(
+        data, obs, reward, done, metrics, info  # pyrefly: ignore[bad-argument-type]
+    )
     return state
 
   def step(self, state: State, action: jax.Array) -> State:
@@ -205,7 +208,9 @@ class PandaPickCube(panda.PandaBase):
         for sensor_id in self._floor_hand_found_sensor
     ]
     floor_collision = sum(hand_floor_collision) > 0
-    no_floor_collision = (1 - floor_collision).astype(float)
+    no_floor_collision = (1 - floor_collision).astype(  # pyrefly: ignore[missing-attribute]
+        float
+    )
 
     info["reached_box"] = 1.0 * jp.maximum(
         info["reached_box"],

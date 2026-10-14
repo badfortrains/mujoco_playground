@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Wrappers for MuJoCo Playground environments."""
 
 import contextlib
@@ -22,8 +22,9 @@ import jax
 from jax import numpy as jp
 import mujoco
 from mujoco import mjx
-from mujoco_playground._src import mjx_env
 import numpy as np
+
+from mujoco_playground._src import mjx_env
 
 
 class Wrapper(mjx_env.MjxEnv):
@@ -94,6 +95,10 @@ def wrap_for_brax_training(
 ) -> Wrapper:
   """Common wrapper pattern for all brax training agents.
 
+  Environments that implement `defer_rendering()` and `render_state(state)`
+  render after episode bookkeeping and autoreset, so cached reset state does
+  not contain pixel observations.
+
   Args:
     env: environment to be wrapped
     episode_length: length of episode
@@ -109,13 +114,48 @@ def wrap_for_brax_training(
     environment did not already have batch dimensions, it is additional Vmap
     wrapped.
   """
+  defer_rendering = hasattr(env, 'defer_rendering') and (
+      hasattr(env, 'render_state') or hasattr(env, 'render_observation')
+  )
+  if defer_rendering:
+    env.defer_rendering()  # pyrefly: ignore[missing-attribute]
   if randomization_fn is None:
-    env = brax_training.VmapWrapper(env)  # pytype: disable=wrong-arg-types
+    env = brax_training.VmapWrapper(env)  # pyrefly: ignore[bad-argument-type, bad-assignment]
   else:
     env = BraxDomainRandomizationVmapWrapper(env, randomization_fn)
-  env = brax_training.EpisodeWrapper(env, episode_length, action_repeat)
+  env = brax_training.EpisodeWrapper(  # pyrefly: ignore[bad-assignment]
+      env, episode_length, action_repeat  # pyrefly: ignore[bad-argument-type]
+  )  # pyrefly: ignore[bad-assignment]
   env = BraxAutoResetWrapper(env, full_reset=full_reset)
+  if defer_rendering:
+    env = DeferredVisionWrapper(env)
   return env
+
+
+class DeferredVisionWrapper(Wrapper):
+  """Renders observations after episode bookkeeping and autoreset."""
+
+  _OBS_KEY = 'DeferredVisionWrapper_obs'
+
+  def reset(self, rng: jax.Array) -> mjx_env.State:
+    return self._render(self.env.reset(rng))
+
+  def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+    info = dict(state.info)
+    obs = info.pop(self._OBS_KEY)
+    state = self.env.step(
+        state.replace(obs=obs, info=info), action  # pyrefly: ignore[missing-attribute]
+    )
+    return self._render(state)
+
+  def _render(self, state: mjx_env.State) -> mjx_env.State:
+    info = dict(state.info)
+    info[self._OBS_KEY] = state.obs
+    state = state.replace(info=info)  # pyrefly: ignore[missing-attribute]
+    if hasattr(self.unwrapped, 'render_state'):
+      return self.unwrapped.render_state(state)
+    obs = self.unwrapped.render_observation(state.data, state.obs)
+    return state.replace(obs=obs)  # pyrefly: ignore[missing-attribute]
 
 
 class BraxAutoResetWrapper(Wrapper):
@@ -174,7 +214,9 @@ class BraxAutoResetWrapper(Wrapper):
       steps = jp.where(state.done, jp.zeros_like(steps), steps)
       state.info.update(steps=steps)
 
-    state = state.replace(done=jp.zeros_like(state.done))
+    state = state.replace(  # pyrefly: ignore[missing-attribute]
+        done=jp.zeros_like(state.done)
+    )
     state = self.env.step(state, action)
 
     def where_done(x, y):
@@ -203,7 +245,7 @@ class BraxAutoResetWrapper(Wrapper):
     next_info[done_count_key] += state.done.astype(int)
     next_info[f'{self._info_key}_rng'] = reset_rng
 
-    return state.replace(data=data, obs=obs, info=next_info)
+    return state.replace(data=data, obs=obs, info=next_info)  # pyrefly: ignore[missing-attribute]
 
 
 class BraxDomainRandomizationVmapWrapper(Wrapper):
@@ -244,5 +286,3 @@ class BraxDomainRandomizationVmapWrapper(Wrapper):
         self._mjx_model_v, state, action
     )
     return res
-
-

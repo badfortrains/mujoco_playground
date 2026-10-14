@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Franka Emika Panda base class."""
 
 from typing import Any, Dict, Optional, Union
@@ -55,7 +55,7 @@ def default_config() -> config_dict.ConfigDict:
       episode_length=150,
       action_repeat=1,
       action_scale=0.04,
-      impl='warp',
+      impl="warp",
       naconmax=12 * 8192,
       njmax=44,
   )
@@ -79,7 +79,7 @@ class PandaBase(mjx_env.MjxEnv):
     mj_model.opt.timestep = self.sim_dt
 
     self._mj_model = mj_model
-    self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(mj_model, impl=self._config.impl)
     self._action_scale = config.action_scale
 
   def _post_init(self, obj_name: str, keyframe: str):

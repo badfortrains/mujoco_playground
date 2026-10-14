@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Humanoid environment."""
 
 from typing import Any, Dict, Optional, Union
@@ -75,7 +75,9 @@ class Humanoid(mjx_env.MjxEnv):
         _XML_PATH.read_text(), self._model_assets
     )
     self._mj_model.opt.timestep = self.sim_dt
-    self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(
+        self._mj_model, impl=self._config.impl
+    )
     self._post_init()
 
   def _post_init(self) -> None:
@@ -116,8 +118,9 @@ class Humanoid(mjx_env.MjxEnv):
     data = mjx_env.step(self.mjx_model, state.data, action, self.n_substeps)
     reward = self._get_reward(data, action, state.info, state.metrics)  # pylint: disable=redefined-outer-name
     obs = self._get_obs(data, state.info)
-    done = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
-    done = done.astype(float)
+    invalid_state = jp.isnan(data.qpos).any() | jp.isnan(data.qvel).any()
+    reward = jp.where(invalid_state, jp.zeros_like(reward), reward)
+    done = invalid_state.astype(float)
     return mjx_env.State(data, obs, reward, done, state.metrics, state.info)
 
   def _get_obs(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:

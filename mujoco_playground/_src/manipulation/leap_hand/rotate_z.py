@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Rotate-z with leap hand."""
 
 from typing import Any, Dict, Optional, Union
@@ -53,7 +53,7 @@ def default_config() -> config_dict.ConfigDict:
               action_rate=0.0,
           ),
       ),
-      impl='warp',
+      impl="warp",
       naconmax=30 * 8192,
       njmax=160,
   )
@@ -158,8 +158,10 @@ class CubeRotateZAxis(leap_hand_base.LeapHandEnv):
     for k, v in rewards.items():
       state.metrics[f"reward/{k}"] = v
 
-    done = done.astype(reward.dtype)
-    state = state.replace(data=data, obs=obs, reward=reward, done=done)
+    done = done.astype(reward.dtype)  # pyrefly: ignore[missing-attribute]
+    state = state.replace(  # pyrefly: ignore[missing-attribute]
+        data=data, obs=obs, reward=reward, done=done
+    )
     return state
 
   def _get_termination(self, data: mjx.Data) -> jax.Array:
@@ -402,7 +404,7 @@ def domain_randomize(model: mjx.Model, rng: jax.Array):
       "actuator_biasprm": 0,
   })
 
-  model = model.tree_replace({
+  model = model.tree_replace({  # pyrefly: ignore[bad-assignment]
       "geom_friction": geom_friction,
       "body_mass": body_mass,
       "body_inertia": body_inertia,

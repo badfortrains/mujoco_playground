@@ -1,23 +1,23 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Core classes for MuJoCo Playground."""
 
 import abc
 import subprocess
 import sys
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union, cast
 import warnings
 
 from etils import epath
@@ -31,11 +31,13 @@ import tqdm
 
 # Root path is used for loading XML strings directly using etils.epath.
 ROOT_PATH = epath.Path(__file__).parent
-# Base directory for external dependencies.
-EXTERNAL_DEPS_PATH = epath.Path(__file__).parent.parent / "external_deps"
-# The menagerie path is used to load robot assets.
-# Resource paths do not have glob implemented, so we use a bare epath.Path.
-MENAGERIE_PATH = EXTERNAL_DEPS_PATH / "mujoco_menagerie"
+try:
+  from . import internal_paths
+  EXTERNAL_DEPS_PATH = internal_paths.EXTERNAL_DEPS_PATH
+  MENAGERIE_PATH = internal_paths.MENAGERIE_PATH
+except ImportError:
+  EXTERNAL_DEPS_PATH = epath.Path(__file__).parent.parent / "external_deps"
+  MENAGERIE_PATH = EXTERNAL_DEPS_PATH / "mujoco_menagerie"
 # Commit SHA of the menagerie repo.
 MENAGERIE_COMMIT_SHA = "1b86ece576591213e2b666ebf59508454200ca97"
 
@@ -59,7 +61,7 @@ def _clone_with_progress(
     current = 0
     while True:
       # Read output line by line.
-      output = process.stderr.readline()  # pytype: disable=attribute-error
+      output = process.stderr.readline()  # pyrefly: ignore[missing-attribute]
       if not output and process.poll() is not None:
         break
       if output:
@@ -124,6 +126,31 @@ def update_assets(
       assets[f.name] = f.read_bytes()
     elif f.is_dir() and recursive:
       update_assets(assets, f, glob, recursive)
+
+def put_model(
+    model: mujoco.MjModel,
+    device: Optional[jax.Device] = None,
+    impl: Optional[Union[str, mjx.Impl]] = None,
+    **kwargs: Any,
+) -> mjx.Model:
+  """Puts a MuJoCo model onto device, filtering overflow warnings for Warp."""
+  mjx_model = mjx.put_model(model, device=device, impl=impl, **kwargs)
+  if impl in (mjx.Impl.WARP, "warp"):
+    warn_overflow = getattr(mjx_model.opt._impl, "warn_overflow", None)
+    if isinstance(warn_overflow, int):
+      import mujoco_warp as mjw  # pylint: disable=g-import-not-at-top
+
+      # Disable solver and linesearch iteration overflow warnings, as MJX
+      # environments intentionally set them low for historical reasons
+      # related to performance optimization.
+      # OverflowType was introduced in mujoco_warp v3.12.0.
+      overflow_type = getattr(mjw, "OverflowType", None)
+      if overflow_type is not None:
+        mask = ~(overflow_type.ITERATIONS | overflow_type.LS_ITERATIONS)
+        mjx_model = mjx_model.tree_replace(
+            {"opt._impl.warn_overflow": warn_overflow & mask}
+        )
+  return cast(mjx.Model, mjx_model)
 
 
 def make_data(
@@ -331,11 +358,11 @@ def render_array(
 ):
   """Renders a trajectory as an array of images."""
   renderer = mujoco.Renderer(mj_model, height=height, width=width)
-  camera = camera if camera is not None else -1
+  camera = camera if camera is not None else -1  # pyrefly: ignore[bad-assignment]
 
   if hfield_data is not None:
-    mj_model.hfield_data = hfield_data.reshape(mj_model.hfield_data.shape)
-    mujoco.mjr_uploadHField(mj_model, renderer._mjr_context, 0)
+    mj_model.hfield_data = hfield_data.reshape(mj_model.hfield_data.shape)  # pyrefly: ignore[bad-assignment]
+    mujoco.mjr_uploadHField(mj_model, renderer._mjr_context, 0)  # pyrefly: ignore[bad-argument-type]
 
   def get_image(state, modify_scn_fn=None) -> np.ndarray:
     d = mujoco.MjData(mj_model)
@@ -343,7 +370,7 @@ def render_array(
     d.mocap_pos, d.mocap_quat = state.data.mocap_pos, state.data.mocap_quat
     d.xfrc_applied = state.data.xfrc_applied
     mujoco.mj_forward(mj_model, d)
-    renderer.update_scene(d, camera=camera, scene_option=scene_option)
+    renderer.update_scene(d, camera=camera, scene_option=scene_option)  # pyrefly: ignore[bad-argument-type]
     if modify_scn_fn is not None:
       modify_scn_fn(renderer.scene)
     return renderer.render()

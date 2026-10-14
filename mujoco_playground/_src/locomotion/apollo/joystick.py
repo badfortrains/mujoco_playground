@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Joystick task for Apollo."""
 
 from typing import Any, Dict, Optional, Union
@@ -21,7 +21,9 @@ import jax.numpy as jp
 from ml_collections import config_dict
 from mujoco import mjx
 from mujoco.mjx._src import math
-from mujoco_playground._src import gait, mjx_env
+
+from mujoco_playground._src import gait
+from mujoco_playground._src import mjx_env
 from mujoco_playground._src.locomotion.apollo import base
 from mujoco_playground._src.locomotion.apollo import constants as consts
 
@@ -242,8 +244,10 @@ class Joystick(base.ApolloEnv):
     )
     for k, v in rewards.items():
       state.metrics[f"reward/{k}"] = v
-    done = done.astype(reward.dtype)
-    state = state.replace(data=data, obs=obs, reward=reward, done=done)
+    done = done.astype(reward.dtype)  # pyrefly: ignore[missing-attribute]
+    state = state.replace(  # pyrefly: ignore[missing-attribute]
+        data=data, obs=obs, reward=reward, done=done
+    )
     return state
 
   def _get_termination(
@@ -441,5 +445,5 @@ class Joystick(base.ApolloEnv):
     qvel = state.data.qvel
     qvel = qvel.at[:2].set(push * push_magnitude + qvel[:2])
     data = state.data.replace(qvel=qvel)
-    state = state.replace(data=data)
+    state = state.replace(data=data)  # pyrefly: ignore[missing-attribute]
     return state

@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Tests for the wrapper module."""
 
 import functools
@@ -21,12 +21,75 @@ from absl.testing import parameterized
 from brax.envs.wrappers import training as brax_training
 import jax
 import jax.numpy as jp
+import numpy as np
+
 from mujoco_playground._src import dm_control_suite
 from mujoco_playground._src import wrapper
-import numpy as np
 
 
 class WrapperTest(parameterized.TestCase):
+
+  @parameterized.named_parameters(
+      ('full_reset', True),
+      ('cache_reset', False),
+  )
+  def test_deferred_vision_renders_selected_reset_data(self, full_reset):
+    class VisionEnv:
+      """Minimal environment implementing deferred vision hooks."""
+
+      def __init__(self, env):
+        self._env = env
+        self.rendering_deferred = False
+
+      def __getattr__(self, name):
+        return getattr(self._env, name)
+
+      @property
+      def unwrapped(self):
+        return self
+
+      def defer_rendering(self):
+        self.rendering_deferred = True
+
+      def render_state(self, state):
+        obs = {
+            'pixels/view_0': state.data.qpos[..., :1],
+            'state': state.obs,
+        }
+        return state.replace(obs=obs)
+
+      def reset(self, key):
+        state = self._env.reset(key)
+        return state.replace(obs=state.data.qpos)
+
+      def step(self, state, action):
+        state = self._env.step(state, jp.ones_like(action))
+        return state.replace(
+            obs=state.data.qpos,
+            done=(action[0] > 0).astype(float),
+        )
+
+    vision_env = VisionEnv(
+        dm_control_suite.load(
+            'CartpoleBalance', config_overrides={'impl': 'jax'}
+        )
+    )
+    env = wrapper.wrap_for_brax_training(vision_env, full_reset=full_reset)
+    state = jax.jit(env.reset)(jax.random.PRNGKey(0)[None])
+    first_qpos = state.data.qpos
+
+    self.assertTrue(vision_env.rendering_deferred)
+    self.assertNotIsInstance(state.info['AutoResetWrapper_first_obs'], dict)
+    np.testing.assert_allclose(state.obs['pixels/view_0'], first_qpos[..., :1])
+
+    state = jax.jit(env.step)(state, jp.ones((1, env.action_size)))
+    if full_reset:
+      self.assertFalse(np.allclose(state.data.qpos, first_qpos))
+    else:
+      np.testing.assert_allclose(state.data.qpos, first_qpos, atol=1e-6)
+    np.testing.assert_allclose(
+        state.obs['pixels/view_0'], state.data.qpos[..., :1]
+    )
 
   @parameterized.named_parameters(
       ('full_reset', True),

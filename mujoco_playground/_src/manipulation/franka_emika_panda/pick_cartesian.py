@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """A simple task with demonstrating sim2real transfer for pixels observations.
 Pick up a cube to a fixed location using a cartesian controller."""
 
@@ -99,6 +99,7 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
 
     mjx_env.MjxEnv.__init__(self, config, config_overrides)
     self._vision = config.vision
+    self._defer_rendering = False
 
     xml_path = (
         mjx_env.ROOT_PATH
@@ -118,7 +119,7 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
     mj_model.opt.timestep = config.sim_dt
 
     self._mj_model = mj_model
-    self._mjx_model = mjx.put_model(mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(mj_model, impl=self._config.impl)
 
     # Set gripper in sight of camera
     self._post_init(obj_name='box', keyframe='low_home')
@@ -129,15 +130,35 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
 
     # Contact sensor IDs.
     self._floor_hand_found_sensor = [
-        self._mj_model.sensor(f"{geom}_floor_found").id
-        for geom in ["left_finger_pad", "right_finger_pad", "hand_capsule"]
+        self._mj_model.sensor(f'{geom}_floor_found').id
+        for geom in ['left_finger_pad', 'right_finger_pad', 'hand_capsule']
     ]
 
     if self._vision:
       self._rc = mjx.create_render_context(
-        mjm=self._mj_model,
-        **self._config.vision_config.to_dict())
+          mjm=self._mj_model, **self._config.vision_config.to_dict()
+      )
       self._rc_pytree = self._rc.pytree()
+
+  @property
+  def observation_size(self) -> mjx_env.ObservationSize:
+    if self._vision:
+      height, width = self._config.vision_config.cam_res
+      return {'pixels/view_0': (height, width, 3)}
+    return super().observation_size
+
+  def defer_rendering(self) -> None:
+    self._defer_rendering = True
+
+  def render_state(self, state: mjx_env.State) -> mjx_env.State:
+    data = mjx.refit_bvh(self._mjx_model, state.data, self._rc_pytree)
+    out = mjx.render(self._mjx_model, data, self._rc_pytree)
+    rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
+    brightness = state.info['brightness'][..., None, None, :]
+    rgb = adjust_brightness(rgb, brightness)
+    return state.replace(  # pyrefly: ignore[missing-attribute]
+        data=out[2], obs={'pixels/view_0': rgb}
+    )
 
   def _post_init(self, obj_name, keyframe):
     super()._post_init(obj_name, keyframe)
@@ -243,13 +264,18 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
       info.update({'brightness': brightness})
 
       data = mjx.forward(self._mjx_model, data)
-      data = mjx.refit_bvh(self._mjx_model, data, self._rc_pytree)
-      out = mjx.render(self._mjx_model, data, self._rc_pytree)
-      rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
-      rgb = adjust_brightness(rgb, brightness)
-      obs = {'pixels/view_0': rgb}
 
-    return mjx_env.State(data, obs, reward, done, metrics, info)
+    state = mjx_env.State(
+        data,
+        obs,
+        reward,
+        done,
+        metrics,  # pyrefly: ignore[bad-argument-type]
+        info,
+    )
+    if self._vision and not self._defer_rendering:
+      state = self.render_state(state)
+    return state
 
   def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
     """Runs one timestep of the environment's dynamics."""
@@ -374,20 +400,16 @@ class PandaPickCubeCartesian(pick.PandaPickCube):
 
     obs = self._get_obs(data, state.info)
     obs = jp.concat([obs, no_soln.reshape(1), action], axis=0)
-    if self._vision:
-      data = mjx.refit_bvh(self._mjx_model, data, self._rc_pytree)
-      out = mjx.render(self._mjx_model, data, self._rc_pytree)
-      rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
-      rgb = adjust_brightness(rgb, state.info['brightness'])
-      obs = {'pixels/view_0': rgb}
-
-    return state.replace(
+    state = state.replace(  # pyrefly: ignore[missing-attribute]
         data=data,
         obs=obs,
         reward=reward,
         done=done.astype(float),
         info=state.info,
     )
+    if self._vision and not self._defer_rendering:
+      state = self.render_state(state)
+    return state
 
   def _get_success(self, data: mjx.Data, info: dict[str, Any]) -> jax.Array:
     box_pos = data.xpos[self._obj_body]

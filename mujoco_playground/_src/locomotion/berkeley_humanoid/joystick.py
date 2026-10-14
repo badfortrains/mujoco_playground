@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Joystick task for Berkeley Humanoid."""
 
 from typing import Any, Dict, Optional, Union
@@ -293,7 +293,7 @@ class Joystick(berkeley_humanoid_base.BerkeleyHumanoidEnv):
     qvel = state.data.qvel
     qvel = qvel.at[:2].set(push * push_magnitude + qvel[:2])
     data = state.data.replace(qvel=qvel)
-    state = state.replace(data=data)
+    state = state.replace(data=data)  # pyrefly: ignore[missing-attribute]
 
     motor_targets = self._default_pose + action * self._config.action_scale
     data = mjx_env.step(
@@ -349,7 +349,7 @@ class Joystick(berkeley_humanoid_base.BerkeleyHumanoidEnv):
     state.metrics["swing_peak"] = jp.mean(state.info["swing_peak"])
 
     done = done.astype(reward.dtype)
-    state = state.replace(data=data, obs=obs, reward=reward, done=done)
+    state = state.replace(data=data, obs=obs, reward=reward, done=done)  # pyrefly: ignore[missing-attribute]
     return state
 
   def _get_termination(self, data: mjx.Data) -> jax.Array:

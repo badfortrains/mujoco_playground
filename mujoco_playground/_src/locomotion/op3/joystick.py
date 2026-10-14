@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Joystick for OP3."""
 
 from typing import Any, Dict, Optional, Union
@@ -198,7 +198,9 @@ class Joystick(op3_base.Op3Env):
         self.mjx_model, state.data, motor_targets, self.n_substeps
     )
 
-    obs = self._get_obs(data, state.info, state.obs, noise_rng)
+    obs = self._get_obs(
+        data, state.info, state.obs, noise_rng  # pyrefly: ignore[bad-argument-type]
+    )
     done = self._get_termination(data)
 
     rewards = self._get_reward(data, action, state.info, state.metrics, done)
@@ -229,7 +231,9 @@ class Joystick(op3_base.Op3Env):
       state.metrics[f"reward/{k}"] = v
 
     done = jp.float32(done)
-    state = state.replace(data=data, obs=obs, reward=reward, done=done)
+    state = state.replace(  # pyrefly: ignore[missing-attribute]
+        data=data, obs=obs, reward=reward, done=done
+    )
     return state
 
   def _get_termination(self, data: mjx.Data) -> jax.Array:
@@ -430,7 +434,7 @@ class Joystick(op3_base.Op3Env):
           force * state.info["direction"]
       )
       data = state.data.replace(xfrc_applied=xfrc_applied)
-      state = state.replace(data=data)
+      state = state.replace(data=data)  # pyrefly: ignore[missing-attribute]
       state.info["steps_since_last_pert"] = jp.where(
           state.info["pert_steps"] >= state.info["pert_duration"],
           0,
@@ -455,7 +459,7 @@ class Joystick(op3_base.Op3Env):
           gen_dir(rng),
           state.info["direction"],
       )
-      return state.replace(data=data)
+      return state.replace(data=data)  # pyrefly: ignore[missing-attribute]
 
     return jax.lax.cond(
         state.info["steps_since_last_pert"]

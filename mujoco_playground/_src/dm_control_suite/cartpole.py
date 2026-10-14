@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Cartpole environment."""
 
 from typing import Any, Dict, Optional, Union
@@ -38,7 +38,7 @@ def default_vision_config() -> config_dict.ConfigDict:
       render_rgb=(True,),
       render_depth=(False,),
       enabled_geom_groups=[0, 1, 2],
-      cam_active=(True, False), # [fixed, lookatcart]
+      cam_active=(True, False),  # [fixed, lookatcart]
   )
 
 
@@ -95,15 +95,14 @@ class Balance(mjx_env.MjxEnv):
         _XML_PATH.read_text(), self._model_assets
     )
     self._mj_model.opt.timestep = self.sim_dt
-    self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(
+        self._mj_model, impl=self._config.impl
+    )
     self._post_init()
 
     if self._vision:
       vision_kwargs = self._config.vision_config.to_dict()
-      self._rc = mjx.create_render_context(
-          mjm=self._mj_model,
-          **vision_kwargs
-      )
+      self._rc = mjx.create_render_context(mjm=self._mj_model, **vision_kwargs)
       self._rc_pytree = self._rc.pytree()
 
   def _post_init(self) -> None:
@@ -181,8 +180,9 @@ class Balance(mjx_env.MjxEnv):
 
     obs = self._get_obs(data, info)
     if self._vision:
-      render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
-      out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
+      data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
+      out = mjx.render(self.mjx_model, data, self._rc_pytree)
+      data = out[2]
       rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
       gray = jp.mean(rgb, axis=-1, keepdims=True) - 0.5
       frame_stack = jp.repeat(gray, 3, axis=-1)
@@ -211,8 +211,9 @@ class Balance(mjx_env.MjxEnv):
 
     obs = self._get_obs(data, state.info)
     if self._vision:
-      render_data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
-      out = mjx.render(self.mjx_model, render_data, self._rc_pytree)
+      data = mjx.refit_bvh(self.mjx_model, data, self._rc_pytree)
+      out = mjx.render(self.mjx_model, data, self._rc_pytree)
+      data = out[2]
       rgb = mjx.get_rgb(self._rc_pytree, 0, out[0])
       gray = jp.mean(rgb, axis=-1, keepdims=True) - 0.5
       prev_stack = state.info["frame_stack"]
@@ -289,10 +290,10 @@ class Balance(mjx_env.MjxEnv):
     alive = jp.float32(0.1)
     pole_pos_penalty = -1.0 * (1.0 - pole_cos) ** 2
     cart_pos = data.qpos[self._slider_qposadr]
-    cart_pos_penalty = -0.02 * cart_pos ** 2
+    cart_pos_penalty = -0.02 * cart_pos**2
     cart_vel_penalty = -0.01 * jp.abs(cart_vel)
     pole_vel_penalty = -0.005 * jp.abs(pole_vel)
-    action_penalty = -0.01 * jp.sum(action ** 2)
+    action_penalty = -0.01 * jp.sum(action**2)
 
     components = {
         "alive": alive,
@@ -306,8 +307,12 @@ class Balance(mjx_env.MjxEnv):
       metrics[f"reward/{k}"] = v
 
     return (
-        alive + pole_pos_penalty + cart_pos_penalty
-        + cart_vel_penalty + pole_vel_penalty + action_penalty
+        alive
+        + pole_pos_penalty
+        + cart_pos_penalty
+        + cart_vel_penalty
+        + pole_vel_penalty
+        + action_penalty
     )
 
   def _sparse_reward(

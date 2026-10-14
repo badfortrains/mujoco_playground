@@ -1,17 +1,17 @@
-# Copyright 2025 DeepMind Technologies Limited
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#     https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# ==============================================================================
+
 """Base class for ALOHA."""
 
 from typing import Any, Dict, Optional, Union
@@ -59,7 +59,9 @@ class AlohaEnv(mjx_env.MjxEnv):
     self._mj_model.vis.global_.offwidth = 3840
     self._mj_model.vis.global_.offheight = 2160
 
-    self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
+    self._mjx_model = mjx_env.put_model(
+        self._mj_model, impl=self._config.impl
+    )
     self._xml_path = xml_path
 
   def _post_init_aloha(self, keyframe: str = "home"):
@@ -110,4 +112,6 @@ class AlohaEnv(mjx_env.MjxEnv):
         data.sensordata[self._mj_model.sensor_adr[sensorid]] > 0
         for sensorid in self._table_finger_found_sensor
     ]
-    return (sum(hand_table_collisions) > 0).astype(float)
+    return (sum(hand_table_collisions) > 0).astype(  # pyrefly: ignore[missing-attribute]
+        float
+    )
