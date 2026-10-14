@@ -152,6 +152,7 @@ class Joystick(mjx_env.MjxEnv):
         super().__init__(config, config_overrides)
 
         path = consts.task_to_xml(task)
+        self._xml_path = path.as_posix()
         self._mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
         self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
         self._mj_model.opt.iterations = 10
@@ -348,7 +349,7 @@ class Joystick(mjx_env.MjxEnv):
 
     @property
     def xml_path(self) -> str:
-        return consts.task_to_xml("flat_terrain").as_posix()
+        return self._xml_path
 
     @property
     def action_size(self) -> int:

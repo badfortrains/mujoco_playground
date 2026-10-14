@@ -108,6 +108,12 @@ _NUM_TIMESTEPS = flags.DEFINE_integer(
 _NUM_VIDEOS = flags.DEFINE_integer(
     "num_videos", 1, "Number of videos to record after training."
 )
+_DIAGNOSTICS = flags.DEFINE_boolean(
+    "diagnostics", False, "Save deterministic rollout data, plots, and rscope files."
+)
+_DIAGNOSTIC_SEEDS = flags.DEFINE_list(
+    "diagnostic_seeds", ["0", "1", "2", "3"], "Fixed seeds for diagnostic rollouts."
+)
 _NUM_EVALS = flags.DEFINE_integer("num_evals", 5, "Number of evaluations")
 _REWARD_SCALING = flags.DEFINE_float("reward_scaling", 0.1, "Reward scaling")
 _EPISODE_LENGTH = flags.DEFINE_integer("episode_length", 1000, "Episode length")
@@ -200,24 +206,6 @@ def get_rl_config(env_name: str) -> config_dict.ConfigDict:
   raise ValueError(f"Env {env_name} not found in {registry.ALL_ENVS}.")
 
 
-def rscope_fn(full_states, obs, rew, done):
-  """
-  All arrays are of shape (unroll_length, rscope_envs, ...)
-  full_states: dict with keys 'qpos', 'qvel', 'time', 'metrics'
-  obs: nd.array or dict obs based on env configuration
-  rew: nd.array rewards
-  done: nd.array done flags
-  """
-  # Calculate cumulative rewards per episode, stopping at first done flag
-  done_mask = jp.cumsum(done, axis=0)
-  valid_rewards = rew * (done_mask == 0)
-  episode_rewards = jp.sum(valid_rewards, axis=0)
-  print(
-      "Collected rscope rollouts with reward"
-      f" {episode_rewards.mean():.3f} +- {episode_rewards.std():.3f}"
-  )
-
-
 def main(argv):
   """Run training and evaluation for the specified environment."""
 
@@ -228,14 +216,66 @@ def main(argv):
 
     wp.config.kernel_cache_dir = _WARP_KERNEL_CACHE_DIR.value
 
+  diagnostics_enabled = _DIAGNOSTICS.value or bool(_RSCOPE_ENVS.value)
+  if diagnostics_enabled:
+    if _VISION.value or _DOMAIN_RANDOMIZATION.value:
+      raise ValueError("Diagnostics currently support non-vision environments with "
+                       "internal randomization (including Rick), not wrapper randomization")
+    # Fail before training if an optional artifact dependency is missing.
+    import matplotlib  # pylint: disable=import-outside-toplevel,unused-import
+    from rscope.rollout import Rollout  # pylint: disable=import-outside-toplevel,unused-import
+    from mujoco_playground._src import rollout_diagnostics
+    diagnostic_seeds = [int(seed) for seed in _DIAGNOSTIC_SEEDS.value]
+    if _RSCOPE_ENVS.value and not _DIAGNOSTIC_SEEDS.present:
+      diagnostic_seeds = list(range(_RSCOPE_ENVS.value))
+    if (not diagnostic_seeds or len(set(diagnostic_seeds)) != len(diagnostic_seeds)
+        or any(seed < 0 or seed >= 2**32 for seed in diagnostic_seeds)):
+      raise ValueError("Diagnostic seeds must be nonempty, unique uint32 values")
+    if not _DETERMINISTIC_RSCOPE.value:
+      raise ValueError("Diagnostic bundles require deterministic_rscope=True")
+    if _NUM_VIDEOS.value > len(diagnostic_seeds):
+      raise ValueError("num_videos cannot exceed the number of diagnostic seeds")
+
   # Load environment configuration
   env_cfg = registry.get_default_config(_ENV_NAME.value)
 
   ppo_params = get_rl_config(_ENV_NAME.value)
 
+  # Handle checkpoint loading
+  if _LOAD_CHECKPOINT_PATH.value is not None:
+    # Convert to absolute path
+    ckpt_path = epath.Path(_LOAD_CHECKPOINT_PATH.value).resolve()
+    if ckpt_path.is_dir() and not (ckpt_path / "commit_success.txt").exists():
+      latest_ckpts = list(ckpt_path.glob("*"))
+      latest_ckpts = [ckpt for ckpt in latest_ckpts if ckpt.is_dir() and ckpt.name.isdigit()
+                      and (ckpt / "commit_success.txt").exists()]
+      latest_ckpts.sort(key=lambda x: int(x.name))
+      if not latest_ckpts:
+        raise ValueError(f"No complete checkpoints under {ckpt_path}")
+      latest_ckpt = latest_ckpts[-1]
+      restore_checkpoint_path = latest_ckpt
+      print(f"Restoring from: {restore_checkpoint_path}")
+    else:
+      restore_checkpoint_path = ckpt_path
+      print(f"Restoring from checkpoint: {restore_checkpoint_path}")
+  else:
+    print("No checkpoint path provided, not restoring from checkpoint")
+    restore_checkpoint_path = None
+
+  # Re-evaluation must use the trained environment/network settings.
+  if _PLAY_ONLY.value and restore_checkpoint_path is not None:
+    saved_dir = restore_checkpoint_path.parent
+    saved_env = saved_dir / "config.json"
+    if saved_env.exists():
+      env_cfg = config_dict.ConfigDict(json.loads(saved_env.read_text()))
+    saved_ppo = saved_dir / "training_config.json"
+    if saved_ppo.exists():
+      ppo_params = config_dict.ConfigDict(json.loads(saved_ppo.read_text()))
+      ppo_params.num_timesteps = 0
+
   if _NUM_TIMESTEPS.present:
     ppo_params.num_timesteps = _NUM_TIMESTEPS.value
-  if _PLAY_ONLY.present:
+  if _PLAY_ONLY.value:
     ppo_params.num_timesteps = 0
   if _NUM_EVALS.present:
     ppo_params.num_evals = _NUM_EVALS.value
@@ -282,7 +322,9 @@ def main(argv):
   if _VALUE_OBS_KEY.present:
     ppo_params.network_factory.value_obs_key = _VALUE_OBS_KEY.value
 
-  env_cfg_overrides = {"impl": _IMPL.value}
+  env_cfg_overrides = {}
+  if not _PLAY_ONLY.value or _IMPL.present:
+    env_cfg_overrides["impl"] = _IMPL.value
   if _VISION.value:
     env_cfg_overrides["vision"] = True
     env_cfg_overrides["vision_config.nworld"] = ppo_params.num_envs
@@ -332,24 +374,6 @@ def main(argv):
   if _USE_TB.value and not _PLAY_ONLY.value and tensorboardX is not None:
     writer = tensorboardX.SummaryWriter(logdir)
 
-  # Handle checkpoint loading
-  if _LOAD_CHECKPOINT_PATH.value is not None:
-    # Convert to absolute path
-    ckpt_path = epath.Path(_LOAD_CHECKPOINT_PATH.value).resolve()
-    if ckpt_path.is_dir():
-      latest_ckpts = list(ckpt_path.glob("*"))
-      latest_ckpts = [ckpt for ckpt in latest_ckpts if ckpt.is_dir()]
-      latest_ckpts.sort(key=lambda x: int(x.name))
-      latest_ckpt = latest_ckpts[-1]
-      restore_checkpoint_path = latest_ckpt
-      print(f"Restoring from: {restore_checkpoint_path}")
-    else:
-      restore_checkpoint_path = ckpt_path
-      print(f"Restoring from checkpoint: {restore_checkpoint_path}")
-  else:
-    print("No checkpoint path provided, not restoring from checkpoint")
-    restore_checkpoint_path = None
-
   # Set up checkpoint directory
   ckpt_path = logdir / "checkpoints"
   ckpt_path.mkdir(parents=True, exist_ok=True)
@@ -358,6 +382,10 @@ def main(argv):
   # Save environment configuration
   with open(ckpt_path / "config.json", "w", encoding="utf-8") as fp:
     json.dump(env_cfg.to_dict(), fp, indent=4)
+
+  (ckpt_path / "training_config.json").write_text(
+      json.dumps(ppo_params.to_dict(), indent=2)
+  )
 
   training_params = dict(ppo_params)
   if "network_factory" in training_params:
@@ -399,9 +427,16 @@ def main(argv):
 
   times = [time.monotonic()]
 
+  evaluation_history = []
+
   # Progress function for logging
   def progress(num_steps, metrics):
     times.append(time.monotonic())
+    evaluation_history.append({
+        "step": int(num_steps),
+        "metrics": {key: float(value) for key, value in metrics.items()},
+    })
+    (logdir / "evaluation_history.json").write_text(json.dumps(evaluation_history, indent=2))
 
     # Log to Weights & Biases
     if _USE_WANDB.value and not _PLAY_ONLY.value:
@@ -426,41 +461,44 @@ def main(argv):
     eval_env_overrides["vision_config.nworld"] = num_eval_envs
   eval_env = registry.load(
       _ENV_NAME.value,
-      config=registry.get_default_config(_ENV_NAME.value),
+      config=config_dict.ConfigDict(env_cfg.to_dict()),
       config_overrides=eval_env_overrides,
   )
 
   policy_params_fn = lambda *args: None
-  if _RSCOPE_ENVS.value:
-    # Interactive visualisation of policy checkpoints
-    from rscope import brax as rscope_utils
+  last_diagnostic_step = None
+  diagnostic_trace = None
 
-    if not _VISION.value:
-      rscope_env = registry.load(
-          _ENV_NAME.value, config=env_cfg, config_overrides=env_cfg_overrides
-      )
-      rscope_env = wrapper.wrap_for_brax_training(
-          rscope_env,
-          episode_length=ppo_params.episode_length,
-          action_repeat=ppo_params.action_repeat,
-          randomization_fn=training_params.get("randomization_fn"),
-      )
-    else:
-      rscope_env = env
-
-    rscope_handle = rscope_utils.BraxRolloutSaver(
-        rscope_env,
-        ppo_params,
-        _VISION.value,
-        _RSCOPE_ENVS.value,
-        _DETERMINISTIC_RSCOPE.value,
-        jax.random.PRNGKey(_SEED.value),
-        rscope_fn,
+  def save_diagnostics(label, make_policy, policy_params, checkpoint):
+    nonlocal diagnostic_trace
+    policy = make_policy(policy_params, deterministic=True)
+    initial, trace = rollout_diagnostics.collect(
+        env, policy, diagnostic_seeds,
+        (ppo_params.episode_length + ppo_params.action_repeat - 1)
+        // ppo_params.action_repeat,
+        ppo_params.action_repeat,
     )
+    diagnostic_trace = trace
+    destination = logdir / "diagnostics" / label
+    rollout_diagnostics.write_bundle(
+        destination, env, initial, trace, diagnostic_seeds,
+        {"env_name": _ENV_NAME.value, "env_config": env_cfg.to_dict(),
+         "ppo_config": ppo_params.to_dict(), "checkpoint": str(checkpoint),
+         "evaluation_history": evaluation_history},
+    )
+    print(f"Diagnostic bundle saved: {destination}", flush=True)
 
-    def policy_params_fn(current_step, make_policy, params):  # pylint: disable=unused-argument
-      rscope_handle.set_make_policy(make_policy)
-      # rscope_handle.dump_rollout(params) # Disabled to prevent rendering slice crash
+  if _RSCOPE_ENVS.value:
+    def policy_params_fn(current_step, make_policy, params):
+      nonlocal last_diagnostic_step
+      # The initial callback has no completed checkpoint to diagnose.
+      if int(current_step) == 0:
+        return
+      last_diagnostic_step = int(current_step)
+      save_diagnostics(
+          f"step_{int(current_step):012d}", make_policy, params,
+          ckpt_path / f"{int(current_step):012d}",
+      )
 
   # Train or load the model
   make_inference_fn, params, _ = train_fn(  # pylint: disable=no-value-for-parameter
@@ -475,6 +513,25 @@ def main(argv):
     print(f"Time to JIT compile: {times[1] - times[0]}")
     print(f"Time to train: {times[-1] - times[1]}")
 
+  if diagnostics_enabled and (last_diagnostic_step is None or _DIAGNOSTICS.value):
+    candidates = sorted(
+        (p for p in ckpt_path.iterdir() if p.is_dir() and p.name.isdigit()
+         and (p / "commit_success.txt").exists()), key=lambda p: int(p.name)
+    )
+    checkpoint = restore_checkpoint_path if _PLAY_ONLY.value else (
+        candidates[-1] if candidates else "in-memory policy (no saved checkpoint)"
+    )
+    save_diagnostics("final", make_inference_fn, params, checkpoint)
+
+  if _NUM_VIDEOS.value == 0:
+    return
+
+  if diagnostics_enabled:
+    rollout_diagnostics.render_videos(
+        env, diagnostic_trace, logdir, _NUM_VIDEOS.value, ppo_params.action_repeat
+    )
+    return
+
   print("Starting inference...")
 
   # Create inference function.
@@ -486,7 +543,7 @@ def main(argv):
     infer_env_overrides["vision_config.nworld"] = _NUM_VIDEOS.value
   infer_env = registry.load(
       _ENV_NAME.value,
-      config=registry.get_default_config(_ENV_NAME.value),
+      config=config_dict.ConfigDict(env_cfg.to_dict()),
       config_overrides=infer_env_overrides,
   )
 

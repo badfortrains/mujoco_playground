@@ -39,6 +39,10 @@ dependencies = [
 keywords = ["mjx", "mujoco", "sim2real", "reinforcement learning"]
 
 [project.optional-dependencies]
+diagnostics = [
+    "matplotlib",
+    "rscope==0.0.8",
+]
 cuda = [
     "jax[cuda12]",
 ]
