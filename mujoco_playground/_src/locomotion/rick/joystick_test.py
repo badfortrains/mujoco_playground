@@ -6,6 +6,7 @@ from absl.testing import absltest
 import jax
 from jax import numpy as jp
 import numpy as np
+import mujoco
 
 from mujoco_playground._src.locomotion.rick import joystick
 
@@ -43,6 +44,80 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
     self.assertEqual(config.swing_foot_height, 0.025)
     self.assertEqual(config.foot_height_tracking_sigma, 1.0e-4)
+    self.assertEqual(config.swing_airborne_reward_weight, 1.0)
+    self.assertEqual(config.swing_foot_clearance, 0.012)
+
+  def test_airborne_reward_requires_contact_release_and_both_ends_clear(self):
+    self.env._swing_airborne_reward_weight = 1.0
+    self.env._swing_foot_clearance = 0.012
+    reward = jax.jit(self.env._get_swing_airborne_reward)
+    phase = jp.array(jp.pi / 2)
+    clear = jp.array([0.012, 0.0])
+    airborne = jp.array([False, True])
+    self.assertAlmostEqual(float(reward(phase, airborne, clear, clear)), 1.0)
+    self.assertEqual(float(reward(phase, jp.array([True, True]), clear, clear)), 0.0)
+    for toe, heel in [(0.0, 0.012), (0.012, 0.0), (0.012, -0.001)]:
+      self.assertEqual(float(reward(
+          phase, airborne, jp.array([toe, 0.0]), jp.array([heel, 0.0])
+      )), 0.0)
+    self.assertAlmostEqual(float(reward(phase, airborne, clear / 2, clear)), 0.5)
+    self.assertAlmostEqual(float(reward(phase, airborne, clear * 2, clear * 2)), 1.0)
+    # A lifted stance foot cannot earn the swing foot's reward.
+    self.assertAlmostEqual(float(reward(phase, airborne[::-1], clear[::-1], clear[::-1])), 0.0)
+    self.assertAlmostEqual(float(reward(phase + jp.pi, airborne[::-1], clear[::-1], clear[::-1])), 1.0)
+    for boundary in (0.0, float(jp.pi), 2 * float(jp.pi)):
+      for offset in (-1e-4, 0.0, 1e-4):
+        self.assertLess(float(reward(
+            jp.array(boundary + offset), jp.array([False, False]),
+            jp.ones(2) * 0.012, jp.ones(2) * 0.012,
+        )), 1e-7)
+
+  def test_sole_corners_follow_loaded_mesh_and_box_transforms(self):
+    vertices = (np.indices((2, 2, 2)).reshape(3, -1).T * 2 - 1) * [0.0375, 0.03, 0.003]
+    vertex_text = ' '.join(str(x) for x in vertices.flat)
+    self.env._mj_model = mujoco.MjModel.from_xml_string(f'''
+      <mujoco><asset><mesh name="sole" vertex="{vertex_text}"/></asset>
+      <worldbody>
+        <body pos="0.1 0.2 0.3" euler="10 20 30">
+          <geom name="left_foot_collision" type="mesh" mesh="sole" pos=".01 .02 .003"/>
+          <site name="left_foot_center" pos=".01 .02 0"/>
+        </body>
+        <body pos="-.1 -.2 .4" euler="-15 25 -35">
+          <geom name="right_foot_collision" type="box" size=".0375 .03 .003" pos=".01 .02 .003"/>
+          <site name="right_foot_center" pos=".01 .02 0"/>
+        </body>
+      </worldbody></mujoco>''')
+    self.env._feet_site_ids = jp.array([0, 1])
+    data = mujoco.MjData(self.env._mj_model)
+    mujoco.mj_forward(self.env._mj_model, data)
+    corners = self.env._get_sole_corners(data)
+    expected = [[-.0375, -.03, 0], [.0375, -.03, 0],
+                [-.0375, .03, 0], [.0375, .03, 0]]
+    np.testing.assert_allclose(corners, [expected, expected], atol=1e-8)
+
+  def test_clearance_detects_pitch_and_roll_despite_raised_foot_center(self):
+    self.env._feet_site_ids = jp.array([0, 1])
+    self.env._sole_corners = jp.array([
+        [[-.0375, -.0375, 0], [.0375, -.0375, 0],
+         [-.0375, .0375, 0], [.0375, .0375, 0]],
+    ] * 2)
+    angle = np.arcsin(.010 / .0375)
+    c, s = np.cos(angle), np.sin(angle)
+    # Pitch left onto its toe; roll right onto one lateral edge.
+    rotations = jp.array([
+        [[1, 0, 0], [0, c, -s], [0, s, c]],
+        [[c, 0, s], [0, 1, 0], [-s, 0, c]],
+    ])
+    def clearance(z):
+      return self.env._get_foot_clearances(SimpleNamespace(
+          site_xmat=rotations, site_xpos=jp.array([[0, 0, z], [0, 0, z]]),
+      ))
+    toe, heel = jax.jit(clearance)(.010)
+    np.testing.assert_allclose(toe, [0, 0], atol=1e-8)
+    np.testing.assert_allclose(heel, [.020, 0], atol=1e-8)
+    toe, heel = jax.jit(clearance)(.022)
+    np.testing.assert_allclose(toe, [.012, .012], atol=1e-8)
+    np.testing.assert_allclose(heel, [.032, .012], atol=1e-8)
 
   def test_foot_slip_cost_requires_contact_regardless_of_gait_phase(self):
     self.env._foot_slip_cost_weight = 20.0

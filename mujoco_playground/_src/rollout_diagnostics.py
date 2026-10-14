@@ -125,6 +125,20 @@ def summarize(trace, seeds):
             if swing.any() else None,
             'height_rmse_m': float(np.sqrt(np.mean((height - target) ** 2))),
         }
+        toe = metrics.get(f'{side}_toe_clearance')
+        heel = metrics.get(f'{side}_heel_clearance')
+        if toe is not None and heel is not None:
+          clearance = np.minimum(toe, heel)
+          item[side].update(
+              max_sole_clearance_m=float(clearance.max()),
+              mean_swing_sole_clearance_m=float(clearance[swing].mean())
+              if swing.any() else None,
+              # A fixed 1 mm threshold separates actual lift from numerical
+              # contact chatter without depending on the training target.
+              swing_airborne_fraction=float(
+                  ((contact[swing] == 0) & (clearance[swing] > 1e-3)).mean()
+              ) if swing.any() else None,
+          )
     summaries.append(item)
   return summaries
 
@@ -147,6 +161,10 @@ def plot_trace(trace, directory, seeds):
       key = f'{side}_foot_contact'
       if key in metrics:
         axes[1].step(t, metrics[key], where='post', color=color, label=key)
+      for end, style in [('toe', ':'), ('heel', '-.')]:
+        key = f'{side}_{end}_clearance'
+        if key in metrics:
+          axes[0].plot(t, 1000 * metrics[key], style, color=color, label=key)
     for key in ['forward_velocity', 'sideways_velocity', 'yaw_rate']:
       if key in metrics:
         axes[2].plot(t, metrics[key], label=key)
@@ -245,10 +263,11 @@ def write_bundle(destination, env, initial, trace, seeds, metadata, rscope=True)
       # NPZ/plots/summary use valid to exclude them entirely.
       swap = lambda x: np.swapaxes(x, 0, 1)
       priority = [
-          'left_foot_height', 'desired_left_foot_height', 'right_foot_height',
-          'desired_right_foot_height', 'left_foot_contact', 'right_foot_contact',
-          'forward_velocity', 'cost_foot_slip', 'reward_foot_phase',
-          'reward_swing_foot_forward',
+          'left_toe_clearance', 'left_heel_clearance',
+          'right_toe_clearance', 'right_heel_clearance',
+          'left_foot_contact', 'right_foot_contact',
+          'reward_swing_airborne', 'forward_velocity',
+          'left_foot_height', 'right_foot_height',
       ]
       metrics = {k: swap(trace['metrics'][k]) for k in priority if k in trace['metrics']}
       metrics.update(valid=swap(trace['valid'].astype(float)), done=swap(trace['done']))

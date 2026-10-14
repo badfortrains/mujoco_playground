@@ -37,7 +37,9 @@ Bundles are written below the experiment's `diagnostics/` directory:
 
 - `traces.npz`: arrays, readable with `numpy.load(..., allow_pickle=False)`.
 - `summary.json`: return, termination, valid step count, mean reward terms,
-  foot-height error and swing-contact fraction (desired clearance > 1 mm).
+  foot-height error and swing-contact fraction (desired center height > 1 mm).
+  Rick also reports maximum/mean swing sole clearance and swing airborne
+  fraction (no contact and every sole corner more than 1 mm above the floor).
 - `seed_*.png`: synchronized height, contact, velocity, and reward plots.
 - `metadata.json`: schema, exact evaluated configuration, checkpoint reference,
   dependency versions/VCS origins, source provenance, and file hashes.
@@ -63,6 +65,22 @@ Rscope uses a uniform playback clock even for frozen padding; the NPZ retains
 physical simulation time. Videos use the same trace and omit padding;
 `rollout0.mp4` corresponds to the first seed.
 
+Rick's `left/right_toe_clearance` and `left/right_heel_clearance` metrics measure
+the lower of the two lateral corners at each end of the sole. Corners come from
+the loaded collision mesh or box, expressed in the foot-center site frame; this
+assumes Rick's rectangular soles and the flat z=0 floor. Negative values expose
+penetration. These measurements distinguish a raised center from a foot rocking
+on an edge. They appear in the height plots and first in rscope's metric list.
+
+New Rick training configs enable `swing_airborne_reward_weight=1.0` and
+`swing_foot_clearance=0.012` (meters). The reward is the squared positive sine of
+the swing phase, multiplied by no-contact and by the lowest sole corner's
+clearance divided by the target, clipped to [0, 1]. It peaks at mid-swing and
+vanishes at phase boundaries. The separate 25 mm center-height reward remains.
+Play-only evaluation of saved configs lacking the new weight keeps this reward
+disabled. Normal training, including training initialized from checkpoint
+weights, uses the current defaults and enables it.
+
 Open a bundle directly on macOS, without overwriting rscope's active directory:
 
 ```sh
@@ -82,6 +100,6 @@ with np.load('/path/to/diagnostics/final/traces.npz', allow_pickle=False) as dat
     height = data['trace/metrics/left_foot_height'][0][valid]
     target = data['trace/metrics/desired_left_foot_height'][0][valid]
     contact = data['trace/metrics/left_foot_contact'][0][valid]
-    print('Peak clearance (mm):', height.max() * 1000)
+    print('Peak center height (mm):', height.max() * 1000)
     print('Swing contact fraction:', contact[target > .001].mean())
 ```

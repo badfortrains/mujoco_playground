@@ -17,6 +17,7 @@ from ml_collections import config_dict
 
 import mujoco
 from mujoco import mjx
+import numpy as np
 from brax import math
 
 import mujoco_playground
@@ -122,6 +123,11 @@ def default_config() -> config_dict.ConfigDict:
         # With summed two-foot error, preserve the original mean-error
         # tolerance so partial lifts still earn useful reward.
         'foot_height_tracking_sigma': 1.0e-4,
+        # Extra credit only for a genuinely airborne swing foot.  The lowest
+        # sole corner must clear 12 mm for full credit; the center-height
+        # tracking term above still asks for a 25 mm peak.
+        'swing_airborne_reward_weight': 1.0,
+        'swing_foot_clearance': 0.012,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
@@ -248,6 +254,13 @@ class Joystick(mjx_env.MjxEnv):
         self._foot_height_tracking_sigma = (
             config.foot_height_tracking_sigma
         )
+        # Saved configs from before this reward retain their original reward.
+        self._swing_airborne_reward_weight = config.get(
+            'swing_airborne_reward_weight', 0.0
+        )
+        self._swing_foot_clearance = config.get('swing_foot_clearance', 0.012)
+        if self._swing_foot_clearance <= 0:
+            raise ValueError('swing_foot_clearance must be positive')
         self._swing_foot_forward_reward_weight = (
             config.swing_foot_forward_reward_weight
         )
@@ -330,6 +343,7 @@ class Joystick(mjx_env.MjxEnv):
         self._default_pose = self._mjx_model.qpos0[7:]
         default_data = mujoco.MjData(self._mj_model)
         mujoco.mj_forward(self._mj_model, default_data)
+        self._sole_corners = jp.array(self._get_sole_corners(default_data))
         self._nominal_base_height = default_data.subtree_com[
             self._body_idx, 2
         ]
@@ -583,6 +597,7 @@ class Joystick(mjx_env.MjxEnv):
         metrics = {
             'reward_velocity_tracking': zero,
             'reward_foot_phase': zero,
+            'reward_swing_airborne': zero,
             'reward_swing_foot_forward': zero,
             'reward_alive': zero,
             'cost_sideways_velocity': zero,
@@ -609,6 +624,10 @@ class Joystick(mjx_env.MjxEnv):
             'uprightness': zero,
             'left_foot_height': zero,
             'right_foot_height': zero,
+            'left_toe_clearance': zero,
+            'right_toe_clearance': zero,
+            'left_heel_clearance': zero,
+            'right_heel_clearance': zero,
             'desired_left_foot_height': zero,
             'desired_right_foot_height': zero,
             'left_foot_forward_position': zero,
@@ -900,6 +919,10 @@ class Joystick(mjx_env.MjxEnv):
         foot_contacts = (
             data.sensordata[self._foot_contact_sensor_adrs] > 0
         )
+        toe_clearance, heel_clearance = self._get_foot_clearances(data)
+        swing_airborne_reward = self._get_swing_airborne_reward(
+            phase, foot_contacts, toe_clearance, heel_clearance
+        )
         foot_contacts_before = (
             data0.sensordata[self._foot_contact_sensor_adrs] > 0
         )
@@ -968,6 +991,7 @@ class Joystick(mjx_env.MjxEnv):
         reward = (
             velocity_tracking_reward
             + foot_phase_reward
+            + swing_airborne_reward
             + swing_foot_forward_reward
             + healthy_reward
             - sideways_velocity_cost
@@ -1032,6 +1056,7 @@ class Joystick(mjx_env.MjxEnv):
         state.metrics.update(
             reward_velocity_tracking=velocity_tracking_reward,
             reward_foot_phase=foot_phase_reward,
+            reward_swing_airborne=swing_airborne_reward,
             reward_swing_foot_forward=swing_foot_forward_reward,
             reward_alive=healthy_reward,
             cost_sideways_velocity=-sideways_velocity_cost,
@@ -1058,6 +1083,10 @@ class Joystick(mjx_env.MjxEnv):
             uprightness=uprightness,
             left_foot_height=foot_heights[0],
             right_foot_height=foot_heights[1],
+            left_toe_clearance=toe_clearance[0],
+            right_toe_clearance=toe_clearance[1],
+            left_heel_clearance=heel_clearance[0],
+            right_heel_clearance=heel_clearance[1],
             desired_left_foot_height=desired_foot_heights[0],
             desired_right_foot_height=desired_foot_heights[1],
             left_foot_forward_position=foot_forward_positions[0],
@@ -1100,6 +1129,87 @@ class Joystick(mjx_env.MjxEnv):
                 'previous_imu_velocity_world': imu_velocity_world,
                 'rng': step_key,
             },
+        )
+
+    def _get_sole_corners(self, data: mujoco.MjData) -> np.ndarray:
+        """Bounds Rick's rectangular soles in their foot-center site frames.
+
+        Use the loaded collision geometry, including MuJoCo's mesh transform,
+        rather than dimensions from a different revision of the robot.  The
+        first two corners are the toe (-Y), the last two the heel (+Y).
+        """
+        corners = []
+        for side, site_id in zip(('left', 'right'), self._feet_site_ids):
+            site_id = int(site_id)
+            geom = self._mj_model.geom(f'{side}_foot_collision')
+            geom_id = geom.id
+            if (
+                self._mj_model.geom_bodyid[geom_id]
+                != self._mj_model.site_bodyid[site_id]
+            ):
+                raise ValueError(
+                    'Foot collision and center site must share a body'
+                )
+            if geom.type[0] == mujoco.mjtGeom.mjGEOM_MESH:
+                mesh_id = int(geom.dataid[0])
+                start = self._mj_model.mesh_vertadr[mesh_id]
+                count = self._mj_model.mesh_vertnum[mesh_id]
+                vertices = self._mj_model.mesh_vert[start:start + count]
+            elif geom.type[0] == mujoco.mjtGeom.mjGEOM_BOX:
+                signs = np.indices((2, 2, 2)).reshape(3, -1).T * 2 - 1
+                vertices = signs * geom.size
+            else:
+                raise ValueError('Rick foot collision must be a mesh or box')
+            world = (
+                vertices @ data.geom_xmat[geom_id].reshape(3, 3).T
+                + data.geom_xpos[geom_id]
+            )
+            local = (
+                (world - data.site_xpos[site_id])
+                @ data.site_xmat[site_id].reshape(3, 3)
+            )
+            low, high = local.min(axis=0), local.max(axis=0)
+            corners.append([
+                [low[0], low[1], low[2]],
+                [high[0], low[1], low[2]],
+                [low[0], high[1], low[2]],
+                [high[0], high[1], low[2]],
+            ])
+        return np.asarray(corners)
+
+    def _get_foot_clearances(
+        self, data: mjx.Data
+    ) -> tuple[jp.ndarray, jp.ndarray]:
+        """Lowest toe/heel corner heights above this task's flat z=0 floor.
+
+        Keeping both lateral corners catches roll as well as pitch.  Preserve
+        negative heights in diagnostics so penetration is visible.
+        """
+        rotations = data.site_xmat[self._feet_site_ids].reshape((-1, 3, 3))
+        heights = (
+            jp.einsum('fkj,fj->fk', self._sole_corners, rotations[:, 2, :])
+            + data.site_xpos[self._feet_site_ids, 2, None]
+        )
+        return jp.min(heights[:, :2], axis=1), jp.min(heights[:, 2:], axis=1)
+
+    def _get_swing_airborne_reward(
+        self,
+        phase: jp.ndarray,
+        contacts: jp.ndarray,
+        toe_clearance: jp.ndarray,
+        heel_clearance: jp.ndarray,
+    ) -> jp.ndarray:
+        # Only the scheduled swing foot earns credit.  Smooth phase weighting
+        # leaves time for load transfer near liftoff/touchdown.  A binary
+        # contact gate alone would reward tiny hops or contact flicker; the
+        # lowest corner must also make progress toward useful clearance.
+        swing = jp.square(jp.maximum(
+            jp.sin(phase + jp.array([0.0, jp.pi])), 0.0
+        ))
+        clearance = jp.minimum(toe_clearance, heel_clearance)
+        progress = jp.clip(clearance / self._swing_foot_clearance, 0.0, 1.0)
+        return self._swing_airborne_reward_weight * jp.sum(
+            swing * (~contacts).astype(progress.dtype) * progress
         )
 
     def _get_foot_slip_cost(

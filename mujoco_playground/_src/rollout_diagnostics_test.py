@@ -65,6 +65,25 @@ def policy(obs, key):
 
 
 class DiagnosticsTest(unittest.TestCase):
+  def test_summary_distinguishes_center_lift_from_sole_clearance(self):
+    # Three valid swing frames: rocking, real lift, and contact despite height.
+    # The fourth frame is padding and must not inflate maximum clearance.
+    trace = {
+        'valid': np.array([[1, 1, 1, 0]]),
+        'done': np.zeros((1, 4)), 'reward': np.zeros((1, 4)),
+        'metrics': {
+            'left_foot_height': np.array([[.01, .02, .02, 1.0]]),
+            'desired_left_foot_height': np.full((1, 4), .025),
+            'left_foot_contact': np.array([[0, 0, 1, 0]]),
+            'left_toe_clearance': np.array([[.02, .012, .012, 1.0]]),
+            'left_heel_clearance': np.array([[0, .006, .012, 1.0]]),
+        },
+    }
+    left = diagnostics.summarize(trace, [0])[0]['left']
+    self.assertAlmostEqual(left['max_sole_clearance_m'], .012)
+    self.assertAlmostEqual(left['mean_swing_sole_clearance_m'], .006)
+    self.assertAlmostEqual(left['swing_airborne_fraction'], 1 / 3)
+
   def test_terminal_transition_and_action_alignment(self):
     initial, trace = diagnostics.collect(CounterEnv(), policy, [0, 1], 5)
     np.testing.assert_array_equal(trace['valid'], [[1, 1, 0, 0, 0]] * 2)
