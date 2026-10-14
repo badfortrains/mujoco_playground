@@ -899,8 +899,12 @@ class Joystick(mjx_env.MjxEnv):
         foot_contacts = (
             data.sensordata[self._foot_contact_sensor_adrs] > 0
         )
+        foot_contacts_before = (
+            data0.sensordata[self._foot_contact_sensor_adrs] > 0
+        )
         foot_slip_cost = self._get_foot_slip_cost(
             foot_velocities_world,
+            foot_contacts_before,
             foot_contacts,
         )
 
@@ -1100,10 +1104,16 @@ class Joystick(mjx_env.MjxEnv):
     def _get_foot_slip_cost(
         self,
         foot_velocities_world: jp.ndarray,
-        foot_contacts: jp.ndarray,
+        foot_contacts_before: jp.ndarray,
+        foot_contacts_after: jp.ndarray,
     ) -> jp.ndarray:
-        """Penalizes contacting feet sliding, including during scheduled swing."""
-        contacts = foot_contacts.astype(foot_velocities_world.dtype)
+        """Penalizes sliding for feet contacting at both interval endpoints."""
+        # Velocity averages the entire control interval. At touchdown it also
+        # contains airborne travel, so do not count contact transitions as slip.
+        # This still catches sustained dragging during scheduled swing.
+        contacts = (foot_contacts_before & foot_contacts_after).astype(
+            foot_velocities_world.dtype
+        )
         tangential_speed_squared = jp.sum(
             jp.square(foot_velocities_world[:, :2]),
             axis=1,
@@ -1328,11 +1338,20 @@ class Joystick(mjx_env.MjxEnv):
         self,
         phase: jp.ndarray,
     ) -> jp.ndarray:
-        """Advances feet on a cosine swing arc, then retracts linearly in stance."""
+        """Returns a cubic swing joined to linear stance with matching velocity."""
         foot_phases = jp.mod(phase + jp.array([0.0, jp.pi]), 2.0 * jp.pi)
+        swing_progress = foot_phases / jp.pi
+        # Hermite swing: rear/front endpoints (-0.5, 0.5), with slope -1
+        # at both ends to match stance retraction. The small rear/front
+        # overshoot lets the foot reverse smoothly relative to the body.
+        swing_fraction = (
+            -0.5 - swing_progress
+            + 6.0 * jp.square(swing_progress)
+            - 4.0 * swing_progress ** 3
+        )
         forward_fraction = jp.where(
             foot_phases < jp.pi,
-            -0.5 * jp.cos(foot_phases),
+            swing_fraction,
             0.5 - (foot_phases - jp.pi) / jp.pi,
         )
         return (

@@ -53,11 +53,13 @@ class JoystickTest(absltest.TestCase):
     cost = self.env._get_foot_slip_cost(
         foot_velocities,
         jp.array([True, False]),
+        jp.array([True, False]),
     )
     self.assertAlmostEqual(float(cost), 1.0, places=6)
 
     no_contact_cost = self.env._get_foot_slip_cost(
         foot_velocities,
+        jp.array([False, False]),
         jp.array([False, False]),
     )
     self.assertEqual(float(no_contact_cost), 0.0)
@@ -65,14 +67,37 @@ class JoystickTest(absltest.TestCase):
     both_contact_cost = jax.jit(self.env._get_foot_slip_cost)(
         foot_velocities,
         jp.array([True, True]),
+        jp.array([True, True]),
     )
     np.testing.assert_allclose(both_contact_cost, 6.0, rtol=1e-6)
 
     vertical_only_cost = self.env._get_foot_slip_cost(
         jp.array([[0.0, 0.0, 3.0], [0.0, 0.0, 5.0]]),
         jp.array([True, True]),
+        jp.array([True, True]),
     )
     self.assertEqual(float(vertical_only_cost), 0.0)
+
+  def test_foot_slip_excludes_airborne_travel_at_contact_transitions(self):
+    self.env._foot_slip_cost_weight = 20.0
+    cost = jax.jit(self.env._get_foot_slip_cost)
+    velocities = jp.array([[0.2, 0.0, 0.0], [0.1, 0.0, 0.0]])
+    # Left foot lands after airborne travel; right foot remains planted.
+    touchdown_cost = cost(
+        velocities, jp.array([False, True]), jp.array([True, True])
+    )
+    np.testing.assert_allclose(touchdown_cost, 0.2, rtol=1e-6)
+    # Left foot lifts off; its airborne travel should likewise be exempt.
+    liftoff_cost = cost(
+        velocities, jp.array([True, True]), jp.array([False, True])
+    )
+    np.testing.assert_allclose(liftoff_cost, 0.2, rtol=1e-6)
+    # Continued contact in the next interval must incur slip on both feet,
+    # even if the gait clock says the left foot should be swinging.
+    dragging_cost = cost(
+        velocities, jp.array([True, True]), jp.array([True, True])
+    )
+    np.testing.assert_allclose(dragging_cost, 1.0, rtol=1e-6)
 
   def test_com_offset_preserves_world_body(self):
     self.env._mjx_model = SimpleNamespace(
@@ -261,6 +286,21 @@ class JoystickTest(absltest.TestCase):
       np.testing.assert_allclose(
           target(boundary - 1e-5), target(boundary + 1e-5), atol=1e-6
       )
+
+  def test_foot_forward_velocity_is_continuous_at_contact_transitions(self):
+    self.env._nominal_foot_forward_positions = jp.array([0.0, 0.0])
+    self.env._swing_foot_forward_distance = 0.030
+    derivative = jax.jit(jax.jacfwd(self.env._desired_foot_forward_positions))
+    # Both feet switch phases together. Target velocity must approach the
+    # same stance retraction velocity on each side of liftoff/touchdown.
+    phase_rate = 2.0 * jp.pi * 1.2
+    for boundary in (0.0, jp.pi, 2.0 * jp.pi):
+      for offset in (-1e-5, 1e-5):
+        np.testing.assert_allclose(
+            derivative(jp.array(boundary + offset)) * phase_rate,
+            [-0.072, -0.072],
+            atol=5e-6,
+        )
 
   def test_imu_velocity_uses_site_position(self):
     self.env._imu_site_id = 1
