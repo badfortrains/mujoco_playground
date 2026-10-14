@@ -119,7 +119,9 @@ def default_config() -> config_dict.ConfigDict:
         # Gait shaping copied from the successful simple task.
         'foot_phase_reward_weight': 1.0,
         'swing_foot_height': 0.025,
-        'foot_height_tracking_sigma': 2.0e-5,
+        # With summed two-foot error, preserve the original mean-error
+        # tolerance so partial lifts still earn useful reward.
+        'foot_height_tracking_sigma': 1.0e-4,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
@@ -878,9 +880,8 @@ class Joystick(mjx_env.MjxEnv):
             )
         )
 
-        # Track a fore-aft swing trajectory relative to the body.  Whole-body
-        # translation cannot satisfy this objective: the airborne foot must
-        # move from behind the torso to ahead of it before touchdown.
+        # Track both feet relative to the body: advance during swing and
+        # retract at constant speed during stance as the body moves forward.
         (
             swing_foot_forward_reward,
             foot_forward_positions,
@@ -900,7 +901,6 @@ class Joystick(mjx_env.MjxEnv):
         )
         foot_slip_cost = self._get_foot_slip_cost(
             foot_velocities_world,
-            desired_foot_heights,
             foot_contacts,
         )
 
@@ -1100,19 +1100,16 @@ class Joystick(mjx_env.MjxEnv):
     def _get_foot_slip_cost(
         self,
         foot_velocities_world: jp.ndarray,
-        desired_foot_heights: jp.ndarray,
         foot_contacts: jp.ndarray,
     ) -> jp.ndarray:
-        """Penalizes tangential velocity only for contacting stance feet."""
-        stance_contacts = (
-            (desired_foot_heights <= 1e-6) & foot_contacts
-        ).astype(foot_velocities_world.dtype)
+        """Penalizes contacting feet sliding, including during scheduled swing."""
+        contacts = foot_contacts.astype(foot_velocities_world.dtype)
         tangential_speed_squared = jp.sum(
             jp.square(foot_velocities_world[:, :2]),
             axis=1,
         )
         return self._foot_slip_cost_weight * jp.sum(
-            stance_contacts * tangential_speed_squared
+            contacts * tangential_speed_squared
         )
 
     def _body_ipos_with_com_offset(
@@ -1331,13 +1328,16 @@ class Joystick(mjx_env.MjxEnv):
         self,
         phase: jp.ndarray,
     ) -> jp.ndarray:
-        """Returns body-relative targets, from rear to front during swing."""
-        foot_phases = phase + jp.array([0.0, jp.pi])
+        """Advances feet on a cosine swing arc, then retracts linearly in stance."""
+        foot_phases = jp.mod(phase + jp.array([0.0, jp.pi]), 2.0 * jp.pi)
+        forward_fraction = jp.where(
+            foot_phases < jp.pi,
+            -0.5 * jp.cos(foot_phases),
+            0.5 - (foot_phases - jp.pi) / jp.pi,
+        )
         return (
             self._nominal_foot_forward_positions
-            - 0.5
-            * self._swing_foot_forward_distance
-            * jp.cos(foot_phases)
+            + self._swing_foot_forward_distance * forward_fraction
         )
 
     def _get_swing_foot_forward_reward(
@@ -1354,7 +1354,7 @@ class Joystick(mjx_env.MjxEnv):
         desired_foot_forward_positions = (
             self._desired_foot_forward_positions(phase)
         )
-        # Track BOTH stance and swing feet so the legs must alternate symmetrically!
+        # Reward alternating placement of both stance and swing feet.
         tracking_error = jp.sum(
             jp.square(foot_forward_positions - desired_foot_forward_positions)
         )

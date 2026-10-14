@@ -23,53 +23,56 @@ class JoystickTest(absltest.TestCase):
 
   def test_default_retraining_config(self):
     config = joystick.default_config()
-    self.assertEqual(config.target_velocity, 0.04)
+    self.assertEqual(config.target_velocity, 0.068)
     self.assertEqual(config.action_scale, 0.40)
-    self.assertEqual(config.step_frequency, 0.68)
+    self.assertEqual(config.step_frequency, 1.2)
     self.assertEqual(config.command_history_length, 12)
-    self.assertEqual(tuple(config.action_delay_range), (0, 2))
+    self.assertEqual(tuple(config.action_delay_range), (0, 4))
     self.assertEqual(tuple(config.foot_friction_range), (0.20, 0.60))
     self.assertEqual(
         tuple(config.center_of_mass_offset_scale),
         (0.005, 0.005, 0.003),
     )
-    self.assertEqual(tuple(config.servo_stiffness_range), (0.25, 0.80))
+    self.assertEqual(tuple(config.servo_stiffness_range), (1.0, 1.0))
     self.assertEqual(
         tuple(config.servo_frictionloss_range), (0.010, 0.025)
     )
-    self.assertEqual(tuple(config.servo_backlash_range_us), (10.0, 30.0))
+    self.assertEqual(tuple(config.servo_backlash_range_us), (5.0, 20.0))
     self.assertEqual(config.action_noise_scale, 0.01)
     self.assertEqual(config.joint_position_noise_scale, 0.03)
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
+    self.assertEqual(config.swing_foot_height, 0.025)
+    self.assertEqual(config.foot_height_tracking_sigma, 1.0e-4)
 
-  def test_foot_slip_cost_requires_stance_and_contact(self):
+  def test_foot_slip_cost_requires_contact_regardless_of_gait_phase(self):
     self.env._foot_slip_cost_weight = 20.0
     foot_velocities = jp.array([
         [0.1, 0.2, 3.0],
         [0.3, 0.4, 5.0],
     ])
-    desired_heights = jp.array([0.0, 0.0])
-
     cost = self.env._get_foot_slip_cost(
         foot_velocities,
-        desired_heights,
         jp.array([True, False]),
     )
     self.assertAlmostEqual(float(cost), 1.0, places=6)
 
     no_contact_cost = self.env._get_foot_slip_cost(
         foot_velocities,
-        desired_heights,
         jp.array([False, False]),
     )
     self.assertEqual(float(no_contact_cost), 0.0)
 
-    swing_cost = self.env._get_foot_slip_cost(
+    both_contact_cost = jax.jit(self.env._get_foot_slip_cost)(
         foot_velocities,
-        jp.array([0.01, 0.01]),
         jp.array([True, True]),
     )
-    self.assertEqual(float(swing_cost), 0.0)
+    np.testing.assert_allclose(both_contact_cost, 6.0, rtol=1e-6)
+
+    vertical_only_cost = self.env._get_foot_slip_cost(
+        jp.array([[0.0, 0.0, 3.0], [0.0, 0.0, 5.0]]),
+        jp.array([True, True]),
+    )
+    self.assertEqual(float(vertical_only_cost), 0.0)
 
   def test_com_offset_preserves_world_body(self):
     self.env._mjx_model = SimpleNamespace(
@@ -200,7 +203,7 @@ class JoystickTest(absltest.TestCase):
     body_forward_xy = jp.array([0.0, -1.0])
     correctly_placed_feet = jp.array([
         [0.0, body_position[1] - desired[0], 0.01],
-        [0.0, body_position[1], 0.0],
+        [0.0, body_position[1] - desired[1], 0.0],
     ])
 
     correct_reward, actual, _ = self.env._get_swing_foot_forward_reward(
@@ -219,6 +222,45 @@ class JoystickTest(absltest.TestCase):
     self.assertAlmostEqual(float(correct_reward), 1.0, places=6)
     self.assertAlmostEqual(float(actual[0]), float(desired[0]), places=6)
     self.assertLess(float(falling_reward), 0.05)
+
+    # Correct swing placement must not hide a misplaced stance foot.
+    misplaced_stance_reward, _, _ = self.env._get_swing_foot_forward_reward(
+        correctly_placed_feet.at[1, 1].add(0.02),
+        body_position,
+        body_forward_xy,
+        phase,
+    )
+    self.assertLess(float(misplaced_stance_reward), 0.05)
+
+  def test_foot_forward_stance_allows_a_planted_foot(self):
+    self.env._nominal_foot_forward_positions = jp.array([0.002, -0.003])
+    self.env._swing_foot_forward_distance = 0.030
+    # The left foot is in stance from pi to 2*pi. A body advancing evenly
+    # through one stride should leave its target fixed in world coordinates.
+    phases = jp.linspace(jp.pi, 2.0 * jp.pi, 9)
+    targets = jax.jit(jax.vmap(self.env._desired_foot_forward_positions))(
+        phases
+    )
+    body_travel = jp.linspace(0.0, 0.030, 9)
+    np.testing.assert_allclose(targets[:, 0] + body_travel, 0.017, atol=1e-7)
+
+  def test_foot_forward_targets_alternate_and_wrap_continuously(self):
+    self.env._nominal_foot_forward_positions = jp.array([0.0, 0.0])
+    self.env._swing_foot_forward_distance = 0.030
+    target = jax.jit(self.env._desired_foot_forward_positions)
+    np.testing.assert_allclose(target(0.0), [-0.015, 0.015], atol=1e-7)
+    np.testing.assert_allclose(target(jp.pi), [0.015, -0.015], atol=1e-7)
+    for phase in (0.0, jp.pi / 4.0, jp.pi / 2.0, jp.pi):
+      np.testing.assert_allclose(
+          target(phase + jp.pi), target(phase)[::-1], atol=1e-7
+      )
+      np.testing.assert_allclose(
+          target(phase - 2.0 * jp.pi), target(phase), atol=1e-7
+      )
+    for boundary in (0.0, jp.pi, 2.0 * jp.pi):
+      np.testing.assert_allclose(
+          target(boundary - 1e-5), target(boundary + 1e-5), atol=1e-6
+      )
 
   def test_imu_velocity_uses_site_position(self):
     self.env._imu_site_id = 1
