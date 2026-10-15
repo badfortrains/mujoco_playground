@@ -122,6 +122,18 @@ class RickPhysicsTest(unittest.TestCase):
     state = jax.jit(jax.vmap(env.step))(state, jp.zeros((2, env.action_size)))
     self.assertEqual(state.obs.shape, (2, 105))
     self.assertTrue(np.isfinite(state.data.qpos).all())
+    # The height reward and diagnostic traces must track the lowest sole
+    # corner, including penetration, rather than the raised center site.
+    for side in ('left', 'right'):
+      np.testing.assert_allclose(
+          state.metrics[f'{side}_foot_height'],
+          np.minimum(state.metrics[f'{side}_toe_clearance'],
+                     state.metrics[f'{side}_heel_clearance']),
+      )
+    self.assertTrue(np.isfinite(state.metrics['reward_swing_lift']).all())
+    reward_terms = [value for key, value in state.metrics.items()
+                    if key.startswith(('reward_', 'cost_'))]
+    np.testing.assert_allclose(state.reward, sum(reward_terms), atol=1e-5)
     policy = lambda obs, key: (jp.zeros(env.action_size), {})
     _, trace = rollout_diagnostics.collect(env, policy, [0, 1], 2)
     self.assertTrue(np.isfinite(trace['data']['qpos']).all())

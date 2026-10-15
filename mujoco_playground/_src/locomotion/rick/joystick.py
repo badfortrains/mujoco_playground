@@ -106,12 +106,12 @@ def default_config() -> config_dict.ConfigDict:
         'madgwick_beta': 0.10,
 
         # Task rewards.
-        'velocity_tracking_weight': 2.0,
+        'velocity_tracking_weight': 4.0,
         'tracking_sigma': 0.0025,
         'sideways_velocity_cost_weight': 0.05,
-        'yaw_rate_cost_weight': 1.0,
-        'heading_cost_weight': 4.0,
-        'orientation_cost_weight': 0.75,
+        'yaw_rate_cost_weight': 0.2,
+        'heading_cost_weight': 1.0,
+        'orientation_cost_weight': 0.3,
         'roll_pitch_rate_cost_weight': 0.05,
         'action_rate_cost_weight': 0.05,
         'action_acceleration_cost_weight': 0.02,
@@ -121,16 +121,20 @@ def default_config() -> config_dict.ConfigDict:
         'healthy_reward': 0.20,
         'vertical_velocity_cost_weight': 0.05,
 
-        # Gait shaping copied from the successful simple task.
+        # Track the lowest sole corner, not the foot-center site's height.
         'foot_phase_reward_weight': 1.0,
-        'swing_foot_height': 0.025,
-        # With summed two-foot error, preserve the original mean-error
-        # tolerance so partial lifts still earn useful reward.
+        'foot_height_uses_sole_clearance': True,
+        'swing_foot_height': 0.012,
+        # Summed two-foot error with a 10 mm tracking tolerance.
         'foot_height_tracking_sigma': 1.0e-4,
+        # Reward partial lifting before contact releases. The starting depth
+        # covers the 3--4 mm sole penetration observed in standing rollouts.
+        'swing_lift_reward_weight': 2.0,
+        'swing_lift_contact_depth': 0.005,
+        'swing_lift_target_clearance': 0.010,
         # Extra credit only for a genuinely airborne swing foot.  The lowest
-        # sole corner must clear 5 mm for full credit; the center-height
-        # tracking term above still asks for a 25 mm peak.
-        'swing_airborne_reward_weight': 1.0,
+        # sole corner must clear 7 mm for full credit.
+        'swing_airborne_reward_weight': 0.5,
         'swing_foot_clearance': 0.007,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
@@ -267,10 +271,23 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         self._foot_phase_reward_weight = config.foot_phase_reward_weight
+        # Missing keys preserve the reward used by older saved configs.
+        self._foot_height_uses_sole_clearance = config.get(
+            'foot_height_uses_sole_clearance', False
+        )
         self._swing_foot_height = config.swing_foot_height
         self._foot_height_tracking_sigma = (
             config.foot_height_tracking_sigma
         )
+        self._swing_lift_reward_weight = config.get('swing_lift_reward_weight', 0.0)
+        self._swing_lift_contact_depth = config.get('swing_lift_contact_depth', 0.005)
+        self._swing_lift_target_clearance = config.get(
+            'swing_lift_target_clearance', 0.010
+        )
+        if self._swing_lift_contact_depth <= 0:
+            raise ValueError('swing_lift_contact_depth must be positive')
+        if self._swing_lift_target_clearance <= 0:
+            raise ValueError('swing_lift_target_clearance must be positive')
         # Saved configs from before this reward retain their original reward.
         self._swing_airborne_reward_weight = config.get(
             'swing_airborne_reward_weight', 0.0
@@ -623,6 +640,7 @@ class Joystick(mjx_env.MjxEnv):
         metrics = {
             'reward_velocity_tracking': zero,
             'reward_foot_phase': zero,
+            'reward_swing_lift': zero,
             'reward_swing_airborne': zero,
             'reward_swing_foot_forward': zero,
             'reward_alive': zero,
@@ -914,7 +932,15 @@ class Joystick(mjx_env.MjxEnv):
         desired_foot_heights = self._desired_foot_heights(phase)
         foot_positions_before = data0.site_xpos[self._feet_site_ids]
         foot_positions_after = data.site_xpos[self._feet_site_ids]
-        foot_heights = jp.maximum(foot_positions_after[:, 2], 0.0)
+        toe_clearance, heel_clearance = self._get_foot_clearances(data)
+        # Metrics use the same height convention as the tracking reward so
+        # diagnostic plots and height RMSE compare like quantities. Preserve
+        # signed penetration to give credit for progress before liftoff.
+        foot_heights = (
+            jp.minimum(toe_clearance, heel_clearance)
+            if self._foot_height_uses_sole_clearance
+            else jp.maximum(foot_positions_after[:, 2], 0.0)
+        )
         foot_height_error = jp.sum(
             jp.square(foot_heights - desired_foot_heights)
         )
@@ -945,7 +971,9 @@ class Joystick(mjx_env.MjxEnv):
         foot_contacts = (
             data.sensordata[self._foot_contact_sensor_adrs] > 0
         )
-        toe_clearance, heel_clearance = self._get_foot_clearances(data)
+        swing_lift_reward = self._get_swing_lift_reward(
+            phase, toe_clearance, heel_clearance
+        )
         swing_airborne_reward = self._get_swing_airborne_reward(
             phase, foot_contacts, toe_clearance, heel_clearance
         )
@@ -1017,6 +1045,7 @@ class Joystick(mjx_env.MjxEnv):
         reward = (
             velocity_tracking_reward
             + foot_phase_reward
+            + swing_lift_reward
             + swing_airborne_reward
             + swing_foot_forward_reward
             + healthy_reward
@@ -1082,6 +1111,7 @@ class Joystick(mjx_env.MjxEnv):
         state.metrics.update(
             reward_velocity_tracking=velocity_tracking_reward,
             reward_foot_phase=foot_phase_reward,
+            reward_swing_lift=swing_lift_reward,
             reward_swing_airborne=swing_airborne_reward,
             reward_swing_foot_forward=swing_foot_forward_reward,
             reward_alive=healthy_reward,
@@ -1217,6 +1247,25 @@ class Joystick(mjx_env.MjxEnv):
             + data.site_xpos[self._feet_site_ids, 2, None]
         )
         return jp.min(heights[:, :2], axis=1), jp.min(heights[:, 2:], axis=1)
+
+    def _get_swing_lift_reward(
+        self,
+        phase: jp.ndarray,
+        toe_clearance: jp.ndarray,
+        heel_clearance: jp.ndarray,
+    ) -> jp.ndarray:
+        """Credits partial swing-foot lifting even while contact persists."""
+        swing = jp.square(jp.maximum(
+            jp.sin(phase + jp.array([0.0, jp.pi])), 0.0
+        ))
+        clearance = jp.minimum(toe_clearance, heel_clearance)
+        progress = jp.clip(
+            (clearance + self._swing_lift_contact_depth)
+            / (self._swing_lift_target_clearance + self._swing_lift_contact_depth),
+            0.0,
+            1.0,
+        )
+        return self._swing_lift_reward_weight * jp.sum(swing * progress)
 
     def _get_swing_airborne_reward(
         self,

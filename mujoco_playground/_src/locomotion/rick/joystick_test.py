@@ -42,10 +42,49 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.action_noise_scale, 0.01)
     self.assertEqual(config.joint_position_noise_scale, 0.03)
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
-    self.assertEqual(config.swing_foot_height, 0.025)
+    self.assertEqual(config.swing_foot_height, 0.012)
+    self.assertTrue(config.foot_height_uses_sole_clearance)
     self.assertEqual(config.foot_height_tracking_sigma, 1.0e-4)
-    self.assertEqual(config.swing_airborne_reward_weight, 1.0)
-    self.assertEqual(config.swing_foot_clearance, 0.015)
+    self.assertEqual(config.swing_lift_reward_weight, 2.0)
+    self.assertEqual(config.swing_lift_contact_depth, 0.005)
+    self.assertEqual(config.swing_lift_target_clearance, 0.010)
+    self.assertEqual(config.swing_airborne_reward_weight, 0.5)
+    self.assertEqual(config.swing_foot_clearance, 0.007)
+    self.assertEqual(config.velocity_tracking_weight, 4.0)
+    self.assertEqual(config.yaw_rate_cost_weight, 0.2)
+    self.assertEqual(config.heading_cost_weight, 1.0)
+    self.assertEqual(config.orientation_cost_weight, 0.3)
+
+  def test_lift_reward_increases_before_contact_release_and_is_bounded(self):
+    self.env._swing_lift_reward_weight = 2.0
+    self.env._swing_lift_contact_depth = 0.005
+    self.env._swing_lift_target_clearance = 0.010
+    reward = jax.jit(self.env._get_swing_lift_reward)
+    phase = jp.array(jp.pi / 2)
+    # Even below the floor, progressively unloading the sole earns credit.
+    heights = [-0.010, -0.005, -0.004, -0.002, 0.0, 0.005, 0.010, 0.020]
+    rewards = [float(reward(phase, jp.array([h, 0.0]), jp.array([h, 0.0])))
+               for h in heights]
+    self.assertEqual(rewards[0], 0.0)
+    self.assertEqual(rewards[1], 0.0)
+    self.assertTrue(np.all(np.diff(rewards[1:-1]) > 0))
+    self.assertAlmostEqual(rewards[-2], 2.0)
+    self.assertAlmostEqual(rewards[-1], 2.0)
+
+  def test_lift_reward_requires_the_scheduled_foot_and_lowest_corner(self):
+    self.env._swing_lift_reward_weight = 2.0
+    self.env._swing_lift_contact_depth = 0.005
+    self.env._swing_lift_target_clearance = 0.010
+    reward = jax.jit(self.env._get_swing_lift_reward)
+    phase = jp.array(jp.pi / 2)
+    toe = jp.array([0.010, -0.005])
+    heel = jp.array([-0.005, -0.005])
+    self.assertAlmostEqual(float(reward(phase, toe, heel)), 0.0)
+    for offset in (0.0, float(jp.pi)):
+      clear = toe if offset == 0.0 else toe[::-1]
+      self.assertAlmostEqual(float(reward(phase + offset, clear, clear)), 2.0)
+      self.assertAlmostEqual(float(reward(phase + offset, clear[::-1], clear[::-1])), 0.0)
+    self.assertLess(float(reward(jp.array(0.0), toe, toe)), 1e-7)
 
   def test_airborne_reward_requires_contact_release_and_both_ends_clear(self):
     self.env._swing_airborne_reward_weight = 1.0
