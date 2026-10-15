@@ -131,7 +131,7 @@ def default_config() -> config_dict.ConfigDict:
         # sole corner must clear 5 mm for full credit; the center-height
         # tracking term above still asks for a 25 mm peak.
         'swing_airborne_reward_weight': 1.0,
-        'swing_foot_clearance': 0.015,
+        'swing_foot_clearance': 0.007,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
