@@ -127,7 +127,7 @@ def default_config() -> config_dict.ConfigDict:
         # sole corner must clear 5 mm for full credit; the center-height
         # tracking term above still asks for a 25 mm peak.
         'swing_airborne_reward_weight': 1.0,
-        'swing_foot_clearance': 0.005,
+        'swing_foot_clearance': 0.015,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
@@ -340,8 +340,14 @@ class Joystick(mjx_env.MjxEnv):
         self._forward_world = jp.array([0.0, -1.0, 0.0])
         self._forward_world_xy = jp.array([0.0, -1.0])
 
-        self._default_pose = self._mjx_model.qpos0[7:]
+        # The settled pose and the servo targets holding it are stored separately.
+        default_keyframe = self._mj_model.key('basic')
+        self._default_qpos = jp.array(default_keyframe.qpos)
+        self._default_pose = jp.array(default_keyframe.ctrl)
         default_data = mujoco.MjData(self._mj_model)
+        mujoco.mj_resetDataKeyframe(
+            self._mj_model, default_data, default_keyframe.id
+        )
         mujoco.mj_forward(self._mj_model, default_data)
         self._sole_corners = jp.array(self._get_sole_corners(default_data))
         self._nominal_base_height = default_data.subtree_com[
@@ -405,7 +411,7 @@ class Joystick(mjx_env.MjxEnv):
             step_key,
         ) = jax.random.split(rng, 24)
 
-        qpos = self._mjx_model.qpos0
+        qpos = self._default_qpos
         root_position_noise = jax.random.uniform(
             root_position_key,
             (3,),
