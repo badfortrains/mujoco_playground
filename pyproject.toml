@@ -45,6 +45,7 @@ diagnostics = [
 ]
 cuda = [
     "jax[cuda12]",
+    "mujoco-mjx[warp]>=3.16.0",
 ]
 test = [
     "absl-py",

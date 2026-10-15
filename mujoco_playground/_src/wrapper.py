@@ -220,6 +220,14 @@ class BraxAutoResetWrapper(Wrapper):
     state = self.env.step(state, action)
 
     def where_done(x, y):
+      if isinstance(x, mjx.Data):
+        if x.impl == mjx.Impl.WARP:
+          # Select per world inside vmap. Warp's contacts and other shared
+          # buffers must stay with the current simulation, even on reset.
+          return jax.vmap(lambda current, first, done: current.where(done, first))(
+              y, x, state.done.astype(bool)
+          )
+        return jax.tree.map(where_done, x, y)
       done = state.done
       if done.shape and done.shape[0] != x.shape[0]:
         return y
@@ -227,13 +235,16 @@ class BraxAutoResetWrapper(Wrapper):
         done = jp.reshape(done, [x.shape[0]] + [1] * (len(x.shape) - 1))
       return jp.where(done, x, y)
 
-    data = jax.tree.map(where_done, reset_data, state.data)
+    data = where_done(reset_data, state.data)
     obs = jax.tree.map(where_done, reset_obs, state.obs)
 
     next_info = state.info
     done_count_key = f'{self._info_key}_done_count'
     if self._full_reset and reset_state:
-      next_info = jax.tree.map(where_done, reset_state.info, state.info)
+      next_info = jax.tree.map(
+          where_done, reset_state.info, state.info,
+          is_leaf=lambda x: isinstance(x, mjx.Data),
+      )
       next_info[done_count_key] = state.info[done_count_key]
 
       if 'steps' in next_info:

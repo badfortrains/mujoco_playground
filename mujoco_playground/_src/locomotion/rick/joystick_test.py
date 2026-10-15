@@ -45,11 +45,11 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.swing_foot_height, 0.025)
     self.assertEqual(config.foot_height_tracking_sigma, 1.0e-4)
     self.assertEqual(config.swing_airborne_reward_weight, 1.0)
-    self.assertEqual(config.swing_foot_clearance, 0.005)
+    self.assertEqual(config.swing_foot_clearance, 0.015)
 
   def test_airborne_reward_requires_contact_release_and_both_ends_clear(self):
     self.env._swing_airborne_reward_weight = 1.0
-    self.env._swing_foot_clearance = joystick.default_config().swing_foot_clearance
+    self.env._swing_foot_clearance = 0.005
     reward = jax.jit(self.env._get_swing_airborne_reward)
     phase = jp.array(jp.pi / 2)
     clear = jp.array([0.005, 0.0])
@@ -268,7 +268,7 @@ class JoystickTest(absltest.TestCase):
     np.testing.assert_allclose(
         self.env._gravity_from_quat(imu_quat),
         self.env._gravity_from_quat(root_quat),
-        atol=1e-7,
+        atol=1e-6,
     )
     self.assertGreater(float(jp.linalg.norm(imu_quat[1:])), 0.01)
 

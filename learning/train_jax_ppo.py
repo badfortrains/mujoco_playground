@@ -334,6 +334,7 @@ def main(argv):
   env = registry.load(
       _ENV_NAME.value, config=env_cfg, config_overrides=env_cfg_overrides
   )
+  print(f"MJX physics backend: {env.mjx_model.impl.value}", flush=True)
   if _RUN_EVALS.present:
     ppo_params.run_evals = _RUN_EVALS.value
   if _LOG_TRAINING_METRICS.present:

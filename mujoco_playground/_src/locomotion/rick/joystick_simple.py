@@ -18,7 +18,9 @@ def default_config() -> config_dict.ConfigDict:
         'sim_dt': 0.002,
         'episode_length': 1000,
         'action_repeat': 1,
-        'impl': 'brax',
+        'impl': 'jax',
+        'naconmax': 16 * 8192,
+        'njmax': 96,
 
         # -------------------------------------------------------------
         # Simplified locomotion command
@@ -133,7 +135,15 @@ class Joystick(mjx_env.MjxEnv):
         self._mj_model.opt.iterations = 10
         self._mj_model.opt.ls_iterations = 6
 
-        self._mjx_model = mjx.put_model(self._mj_model)
+        if self._config.impl == 'warp' and not hasattr(mjx.Data, 'where'):
+            raise RuntimeError('Rick MJX-Warp requires mujoco-mjx[warp]>=3.16.0')
+        model_kwargs = {}
+        if self._config.impl == 'warp':
+            from mujoco.mjx.warp import types as warp_types
+            model_kwargs['graph_mode'] = warp_types.GraphMode.WARP_STAGED
+        self._mjx_model = mjx_env.put_model(
+            self._mj_model, impl=self._config.impl, **model_kwargs
+        )
 
         self._action_dim = self._mjx_model.nu
 
@@ -289,6 +299,9 @@ class Joystick(mjx_env.MjxEnv):
             self._mj_model,
             qpos=qpos,
             qvel=qvel,
+            impl=self.mjx_model.impl.value,
+            naconmax=self._config.naconmax,
+            njmax=self._config.njmax,
         )
 
         data = mjx.forward(self._mjx_model, data)

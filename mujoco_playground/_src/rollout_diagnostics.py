@@ -14,6 +14,7 @@ from etils import epath
 import jax
 import jax.numpy as jp
 import mujoco
+from mujoco import mjx
 import numpy as np
 
 
@@ -54,9 +55,19 @@ def collect(env, policy, seeds, steps, action_repeat=1):
 
       def repeat(carry, unused):
         current, alive, reward = carry
-        next_state = jax.lax.cond(
-            alive, lambda s: env.step(s, action), lambda s: s, current
-        )
+        if getattr(current.data, 'impl', None) == mjx.Impl.WARP:
+          # A vmapped cond selects every leaf, including Warp's batch-wide
+          # contact buffers. Step all worlds and freeze only per-world state.
+          candidate = env.step(jax.tree.map(lambda x: x, current), action)
+          data = candidate.data.where(~alive, current.data)
+          next_state = jax.tree.map(
+              lambda new, old: jp.where(alive, new, old),
+              candidate.replace(data=None), current.replace(data=None),
+          ).replace(data=data)
+        else:
+          next_state = jax.lax.cond(
+              alive, lambda s: env.step(s, action), lambda s: s, current
+          )
         reward += jp.where(alive, next_state.reward, 0.0)
         alive = alive & ~next_state.done.astype(bool)
         return (next_state, alive, reward), None
@@ -246,7 +257,8 @@ def write_bundle(destination, env, initial, trace, seeds, metadata, rscope=True)
       if source.is_file():
         (sources / f'{index}_{source.name}').write_bytes(source.read_bytes())
     packages = {}
-    for name in ['playground', 'brax', 'jax', 'jaxlib', 'mujoco', 'mujoco-mjx', 'rscope']:
+    for name in ['playground', 'brax', 'jax', 'jaxlib', 'mujoco', 'mujoco-mjx',
+                 'warp-lang', 'rscope']:
       try:
         dist = importlib.metadata.distribution(name)
         packages[name] = {'version': dist.version,

@@ -35,7 +35,11 @@ def default_config() -> config_dict.ConfigDict:
         'sim_dt': 0.002,
         'episode_length': 1000,
         'action_repeat': 1,
-        'impl': 'brax',
+        'impl': 'jax',
+        # Warp contact capacity is shared across the whole training batch;
+        # constraint capacity is per world. Allow up to 16 contacts per robot.
+        'naconmax': 16 * 8192,
+        'njmax': 96,
 
         # Policy command and gait parameters.
         'target_velocity': 0.068,
@@ -163,7 +167,20 @@ class Joystick(mjx_env.MjxEnv):
         self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
         self._mj_model.opt.iterations = 10
         self._mj_model.opt.ls_iterations = 6
-        self._mjx_model = mjx.put_model(self._mj_model)
+        if self._config.impl == 'warp' and not hasattr(mjx.Data, 'where'):
+            raise RuntimeError(
+                'Rick MJX-Warp requires mujoco-mjx[warp]>=3.16.0. '
+                'Use --impl=jax with older installations.'
+            )
+        model_kwargs = {}
+        if self._config.impl == 'warp':
+            from mujoco.mjx.warp import types as warp_types
+            # Stable staging buffers avoid repeated CUDA graph captures when
+            # XLA changes buffer addresses between PPO iterations.
+            model_kwargs['graph_mode'] = warp_types.GraphMode.WARP_STAGED
+        self._mjx_model = mjx_env.put_model(
+            self._mj_model, impl=self._config.impl, **model_kwargs
+        )
 
         self._action_dim = self._mjx_model.nu
         self._history_len = config.command_history_length
@@ -544,6 +561,9 @@ class Joystick(mjx_env.MjxEnv):
             qpos=qpos,
             qvel=qvel,
             ctrl=motor_targets,
+            impl=self.mjx_model.impl.value,
+            naconmax=self._config.naconmax,
+            njmax=self._config.njmax,
         )
         reset_model = self._mjx_model.tree_replace({
             'body_ipos': self._body_ipos_with_com_offset(
