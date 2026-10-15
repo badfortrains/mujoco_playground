@@ -109,8 +109,8 @@ def default_config() -> config_dict.ConfigDict:
         'velocity_tracking_weight': 4.0,
         'tracking_sigma': 0.0025,
         'sideways_velocity_cost_weight': 0.05,
-        'yaw_rate_cost_weight': 0.2,
-        'heading_cost_weight': 1.0,
+        'yaw_rate_cost_weight': 0.4,
+        'heading_cost_weight': 2.0,
         'orientation_cost_weight': 0.3,
         'roll_pitch_rate_cost_weight': 0.05,
         'action_rate_cost_weight': 0.05,
@@ -122,7 +122,7 @@ def default_config() -> config_dict.ConfigDict:
         'vertical_velocity_cost_weight': 0.05,
 
         # Track the lowest sole corner, not the foot-center site's height.
-        'foot_phase_reward_weight': 1.0,
+        'foot_phase_reward_weight': 1.5,
         'foot_height_uses_sole_clearance': True,
         'swing_foot_height': 0.012,
         # Summed two-foot error with a 10 mm tracking tolerance.
@@ -134,7 +134,7 @@ def default_config() -> config_dict.ConfigDict:
         'swing_lift_target_clearance': 0.010,
         # Extra credit only for a genuinely airborne swing foot.  The lowest
         # sole corner must clear 7 mm for full credit.
-        'swing_airborne_reward_weight': 0.5,
+        'swing_airborne_reward_weight': 1.0,
         'swing_foot_clearance': 0.007,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
