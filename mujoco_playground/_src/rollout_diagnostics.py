@@ -249,7 +249,8 @@ def write_bundle(destination, env, initial, trace, seeds, metadata, rscope=True)
     paths = [Path(inspect.getfile(type(env))), Path(__file__),
              Path(sys.argv[0]), Path(inspect.getfile(type(env))).parent / 'rick_constants.py']
     for name in ['mujoco_playground._src.mjx_env', 'mujoco_playground._src.wrapper',
-                 'mujoco_playground.config.locomotion_params']:
+                 'mujoco_playground.config.locomotion_params',
+                 'mujoco_playground._src.locomotion.rick.checkpoint_upgrade']:
       module = sys.modules.get(name)
       if module is not None:
         paths.append(Path(inspect.getfile(module)))

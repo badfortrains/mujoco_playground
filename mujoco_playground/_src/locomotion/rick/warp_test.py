@@ -120,7 +120,9 @@ class RickPhysicsTest(unittest.TestCase):
     state = jax.jit(jax.vmap(env.reset))(keys)
     self.assertFalse(np.array_equal(state.info['servo_strength'][0], state.info['servo_strength'][1]))
     state = jax.jit(jax.vmap(env.step))(state, jp.zeros((2, env.action_size)))
-    self.assertEqual(state.obs.shape, (2, 105))
+    self.assertEqual(state.obs.shape, (2, 107))
+    self.assertTrue(np.isfinite(state.metrics['estimated_heading_error']).all())
+    self.assertTrue(np.all(state.metrics['cycle_window_ready'] == 0))
     self.assertTrue(np.isfinite(state.data.qpos).all())
     # The height reward and diagnostic traces must track the lowest sole
     # corner, including penetration, rather than the raised center site.

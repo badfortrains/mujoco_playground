@@ -21,6 +21,7 @@ class JoystickTest(absltest.TestCase):
     self.env._madgwick_beta = 0.1
     self.env._gyro_obs_scale = 0.25
     self.env._target_velocity = 0.04
+    self.env._heading_observation = False
 
   def test_default_retraining_config(self):
     config = joystick.default_config()
@@ -28,6 +29,11 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.action_scale, 0.40)
     self.assertEqual(config.step_frequency, 1.2)
     self.assertEqual(config.command_history_length, 12)
+    self.assertTrue(config.heading_observation)
+    self.assertTrue(config.gyro_bias_calibration)
+    self.assertEqual(config.gyro_bias_calibration_samples, 100)
+    self.assertEqual(config.cycle_sideways_velocity_cost_weight, 0.5)
+    self.assertEqual(config.cycle_yaw_rate_cost_weight, 4.0)
     self.assertEqual(tuple(config.action_delay_range), (0, 4))
     self.assertEqual(tuple(config.foot_friction_range), (0.20, 0.60))
     self.assertEqual(
@@ -331,6 +337,46 @@ class JoystickTest(absltest.TestCase):
     np.testing.assert_allclose(observation[99:102], 0.25 * gyro)
     np.testing.assert_allclose(observation[102:104], jp.array([0.0, 1.0]))
     self.assertAlmostEqual(float(observation[104]), 0.04)
+
+  def test_heading_observation_appends_estimated_relative_heading(self):
+    self.env._heading_observation = True
+    for angle in (0.0, np.pi / 2, np.pi * 2 + 0.3):
+      obs = jax.jit(self.env._get_observation)(
+          jp.zeros((12, 8)), jp.array([0., 0., -1.]), jp.zeros(3),
+          jp.array(0.0), jp.array(angle),
+      )
+      self.assertEqual(obs.shape, (107,))
+      np.testing.assert_allclose(obs[105:], [np.sin(angle), np.cos(angle)], atol=3e-7)
+
+  def test_heading_uses_forward_axis_and_survives_wrap_and_quaternion_sign(self):
+    from brax import math
+    tilt = self.env._roll_pitch_quat(jp.array([0.2, -0.3]))
+    for angle in (-3.2, -0.4, 0.0, 1.2, 3.2):
+      yaw = jp.array([np.cos(angle / 2), 0, 0, np.sin(angle / 2)])
+      q = math.quat_mul(yaw, tilt)
+      forward = math.rotate(jp.array([0., -1., 0.]), q)
+      expected = np.arctan2(forward[0], -forward[1])
+      for sign in (1, -1):
+        actual = self.env._heading_from_quat(sign * q)
+        np.testing.assert_allclose(actual, expected, atol=3e-7)
+
+  def test_cycle_mean_cancels_sway_and_retains_drift_without_startup_bias(self):
+    self.env._cycle_window = 4
+    self.env._cycle_weights = jp.ones(4) / 4
+    update = jax.jit(self.env._update_cycle_velocity)
+    history, count = jp.zeros((4, 2)), jp.array(0)
+    for i in range(12):
+      sway = jp.array([0.1, 0.6]) * (1 if i % 2 else -1)
+      history, count, mean, ready = update(history, count, sway + jp.array([.02, .05]))
+      self.assertEqual(bool(ready), i >= 3)
+      np.testing.assert_allclose(mean, [.02, .05] if i >= 3 else [0, 0], atol=2e-8)
+    # At a non-integral period, only the oldest interval is fractional.
+    self.env._cycle_weights = jp.array([.5, 1., 1., 1.]) / 3.5
+    _, _, mean, _ = self.env._update_cycle_velocity(
+        jp.array([[9., 9.], [2., 0.], [4., 0.], [6., 0.]]),
+        jp.array(4), jp.array([8., 0.]),
+    )
+    np.testing.assert_allclose(mean, [(1 + 4 + 6 + 8) / 3.5, 0], rtol=1e-6)
 
   def test_swing_foot_forward_reward_requires_body_relative_placement(self):
     self.env._nominal_foot_forward_positions = jp.array([0.0, 0.0])

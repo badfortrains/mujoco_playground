@@ -414,6 +414,29 @@ def main(argv):
   if "num_eval_envs" in training_params:
     del training_params["num_eval_envs"]
 
+  # Rick appends estimated sin/cos heading to the existing observation. Pad
+  # only this known transition, keeping old policy/value outputs unchanged.
+  # Play-only uses saved configs above and must never migrate a checkpoint.
+  if (_ENV_NAME.value == "RickJoystickFlatTerrain" and not _PLAY_ONLY.value
+      and restore_checkpoint_path is not None and env_cfg.get("heading_observation", False)):
+    from brax.training.agents.ppo import checkpoint as ppo_checkpoint
+    from mujoco_playground._src.locomotion.rick import checkpoint_upgrade
+    saved_network = json.loads(
+        (restore_checkpoint_path / "ppo_network_config.json").read_text()
+    )
+    old_dim = saved_network["observation_size"]["shape"][0]
+    if old_dim + 2 == env.observation_size:
+      saved_env = json.loads((restore_checkpoint_path.parent / "config.json").read_text())
+      if (saved_env.get("heading_observation", False)
+          or saved_env["command_history_length"] != env_cfg.command_history_length
+          or saved_network["action_size"] != env.action_size):
+        raise ValueError("Checkpoint is not a compatible pre-heading Rick policy")
+      training_params["restore_params"] = checkpoint_upgrade.add_heading_inputs(
+          ppo_checkpoint.load(restore_checkpoint_path), old_dim
+      )
+      print(f"Upgraded Rick checkpoint inputs: {old_dim} -> {env.observation_size}")
+      restore_checkpoint_path = None
+
   train_fn = functools.partial(
       ppo.train,
       **training_params,

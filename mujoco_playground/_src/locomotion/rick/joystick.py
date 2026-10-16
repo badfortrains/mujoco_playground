@@ -5,9 +5,9 @@ The policy observation contains only values available at deployment:
 * recent normalized servo commands (known by the controller),
 * a body-frame gravity estimate and angular velocity from the LSM6DSO,
 * the controller's gait clock, and
-* the commanded forward speed.
+* the commanded forward speed and estimated heading relative to START.
 
-Joint state, root velocity, heading, foot state, and contact state are used only
+Joint state, root velocity, true heading, foot state, and contact state are used only
 for rewards, termination, and diagnostics during training.
 """
 
@@ -104,13 +104,20 @@ def default_config() -> config_dict.ConfigDict:
         'gyro_bias_scale': 0.02,
         'gyro_obs_scale': 0.25,
         'madgwick_beta': 0.10,
+        'heading_observation': True,
+        # Finite-sample error of a stationary pre-START gyro average.
+        'gyro_bias_calibration': True,
+        'gyro_bias_calibration_samples': 100,
 
         # Task rewards.
         'velocity_tracking_weight': 4.0,
         'tracking_sigma': 0.0025,
-        'sideways_velocity_cost_weight': 0.2,
+        'sideways_velocity_cost_weight': 0.05,
         'yaw_rate_cost_weight': 0.4,
-        'heading_cost_weight': 4.0,
+        # Average a full gait period BEFORE squaring: alternating sway cancels.
+        'cycle_sideways_velocity_cost_weight': 0.5,
+        'cycle_yaw_rate_cost_weight': 4.0,
+        'heading_cost_weight': 2.0,
         'orientation_cost_weight': 0.3,
         'roll_pitch_rate_cost_weight': 0.05,
         'action_rate_cost_weight': 0.05,
@@ -254,6 +261,29 @@ class Joystick(mjx_env.MjxEnv):
         )
         self._yaw_rate_cost_weight = config.yaw_rate_cost_weight
         self._heading_cost_weight = config.heading_cost_weight
+        # Missing keys retain old saved checkpoints' observation/reward semantics.
+        self._heading_observation = config.get('heading_observation', False)
+        self._gyro_bias_calibration = config.get('gyro_bias_calibration', False)
+        self._gyro_bias_calibration_samples = int(config.get(
+            'gyro_bias_calibration_samples', 100
+        ))
+        if self._gyro_bias_calibration_samples < 1:
+            raise ValueError('gyro_bias_calibration_samples must be positive')
+        self._cycle_sideways_velocity_cost_weight = config.get(
+            'cycle_sideways_velocity_cost_weight', 0.0
+        )
+        self._cycle_yaw_rate_cost_weight = config.get(
+            'cycle_yaw_rate_cost_weight', 0.0
+        )
+        if self._step_frequency <= 0:
+            raise ValueError('step_frequency must be positive')
+        # Fractional oldest sample gives exactly one gait period, including
+        # frequencies whose period is not an integer number of control steps.
+        self._cycle_samples = 1.0 / (self._step_frequency * self.dt)
+        self._cycle_window = int(np.ceil(self._cycle_samples))
+        self._cycle_weights = jp.ones(self._cycle_window).at[0].set(
+            self._cycle_samples - (self._cycle_window - 1)
+        ) / self._cycle_samples
         self._orientation_cost_weight = config.orientation_cost_weight
         self._roll_pitch_rate_cost_weight = (
             config.roll_pitch_rate_cost_weight
@@ -614,6 +644,13 @@ class Joystick(mjx_env.MjxEnv):
             minval=-self._gyro_bias_scale,
             maxval=self._gyro_bias_scale,
         )
+        gyro_bias_estimate = jp.zeros(3)
+        if self._gyro_bias_calibration:
+            # Equivalent to averaging N stationary noisy measurements. Only
+            # the corrected measurement reaches the policy, never true bias.
+            gyro_bias_estimate = gyro_bias + jax.random.normal(
+                jax.random.fold_in(gyro_bias_key, 1), (3,)
+            ) * self._gyro_noise_scale / np.sqrt(self._gyro_bias_calibration_samples)
 
         # The Pico runs Madgwick continuously while stopped and preserves the
         # settled estimate on START.  Begin from the simulated IMU site's
@@ -622,10 +659,12 @@ class Joystick(mjx_env.MjxEnv):
             self._get_imu_quat(data)
         )
         gravity_estimate = self._gravity_from_quat(imu_quat)
+        heading_reference = self._heading_from_quat(imu_quat)
         _, gyro_local = self._get_imu_signals(data)
         gyro_measurement = (
             gyro_local
             + gyro_bias
+            - gyro_bias_estimate
             + jax.random.normal(initial_gyro_key, (3,))
             * self._gyro_noise_scale
         )
@@ -634,6 +673,7 @@ class Joystick(mjx_env.MjxEnv):
             gravity_estimate=gravity_estimate,
             gyro_measurement=gyro_measurement,
             phase=phase,
+            heading_error=jp.array(0.0),
         )
 
         zero = jp.array(0.0)
@@ -646,6 +686,12 @@ class Joystick(mjx_env.MjxEnv):
             'reward_alive': zero,
             'cost_sideways_velocity': zero,
             'cost_yaw_rate': zero,
+            'cost_cycle_sideways_velocity': zero,
+            'cost_cycle_yaw_rate': zero,
+            'cycle_sideways_velocity': zero,
+            'cycle_yaw_rate': zero,
+            'cycle_window_ready': zero,
+            'estimated_heading_error': zero,
             'cost_heading': zero,
             'cost_orientation': zero,
             'cost_roll_pitch_rate': zero,
@@ -714,9 +760,13 @@ class Joystick(mjx_env.MjxEnv):
                 'center_of_mass_offset': center_of_mass_offset,
                 'phase': phase,
                 'imu_quat': imu_quat,
+                'heading_reference': heading_reference,
+                'drift_history': jp.zeros((self._cycle_window, 2)),
+                'drift_history_count': jp.array(0, dtype=jp.int32),
                 'previous_imu_velocity_world': jp.zeros((3,)),
                 'accelerometer_bias': accelerometer_bias,
                 'gyro_bias': gyro_bias,
+                'gyro_bias_estimate': gyro_bias_estimate,
                 'rng': step_key,
             },
         )
@@ -994,6 +1044,21 @@ class Joystick(mjx_env.MjxEnv):
         )
         yaw_rate = root_angular_velocity_world[2]
         yaw_rate_cost = self._yaw_rate_cost_weight * jp.square(yaw_rate)
+        drift_history, drift_count, cycle_velocity, cycle_ready = (
+            self._update_cycle_velocity(
+                state.info['drift_history'], state.info['drift_history_count'],
+                jp.array([sideways_velocity, yaw_rate]),
+            )
+        )
+        cycle_sideways_velocity_cost = (
+            self._cycle_sideways_velocity_cost_weight
+            * jp.square(cycle_velocity[0]) / self._tracking_sigma
+            * cycle_ready
+        )
+        cycle_yaw_rate_cost = (
+            self._cycle_yaw_rate_cost_weight * jp.square(cycle_velocity[1])
+            * cycle_ready
+        )
         roll_pitch_rate_cost = (
             self._roll_pitch_rate_cost_weight
             * jp.sum(jp.square(root_angular_velocity_local[:2]))
@@ -1051,6 +1116,8 @@ class Joystick(mjx_env.MjxEnv):
             + healthy_reward
             - sideways_velocity_cost
             - yaw_rate_cost
+            - cycle_sideways_velocity_cost
+            - cycle_yaw_rate_cost
             - heading_cost
             - tilt_cost
             - roll_pitch_rate_cost
@@ -1089,6 +1156,7 @@ class Joystick(mjx_env.MjxEnv):
         gyro_measurement = (
             gyro_local
             + state.info['gyro_bias']
+            - state.info['gyro_bias_estimate']
             + jax.random.normal(gyro_noise_key, (3,))
             * self._gyro_noise_scale
         )
@@ -1098,14 +1166,18 @@ class Joystick(mjx_env.MjxEnv):
             accelerometer_measurement,
         )
         gravity_estimate = self._gravity_from_quat(imu_quat)
+        heading_error = self._wrap_phase(
+            self._heading_from_quat(imu_quat) - state.info['heading_reference']
+        )
 
-        # Only the filtered gravity estimate and raw gyro are exposed.  All
-        # reward state above remains privileged to training.
+        # Heading uses the same noisy filter as the Pico, not privileged root
+        # orientation. All reward state above remains training-only.
         observation = self._get_observation(
             command_history=new_command_history,
             gravity_estimate=gravity_estimate,
             gyro_measurement=gyro_measurement,
             phase=phase,
+            heading_error=heading_error,
         )
 
         state.metrics.update(
@@ -1117,6 +1189,12 @@ class Joystick(mjx_env.MjxEnv):
             reward_alive=healthy_reward,
             cost_sideways_velocity=-sideways_velocity_cost,
             cost_yaw_rate=-yaw_rate_cost,
+            cost_cycle_sideways_velocity=-cycle_sideways_velocity_cost,
+            cost_cycle_yaw_rate=-cycle_yaw_rate_cost,
+            cycle_sideways_velocity=cycle_velocity[0],
+            cycle_yaw_rate=cycle_velocity[1],
+            cycle_window_ready=cycle_ready.astype(jp.float32),
+            estimated_heading_error=heading_error,
             cost_heading=-heading_cost,
             cost_orientation=-tilt_cost,
             cost_roll_pitch_rate=-roll_pitch_rate_cost,
@@ -1182,6 +1260,8 @@ class Joystick(mjx_env.MjxEnv):
                 'servo_output_target': servo_output_target,
                 'phase': phase,
                 'imu_quat': imu_quat,
+                'drift_history': drift_history,
+                'drift_history_count': drift_count,
                 'previous_imu_velocity_world': imu_velocity_world,
                 'rng': step_key,
             },
@@ -1323,8 +1403,9 @@ class Joystick(mjx_env.MjxEnv):
         gravity_estimate: jp.ndarray,
         gyro_measurement: jp.ndarray,
         phase: jp.ndarray,
+        heading_error: jp.ndarray = jp.array(0.0),
     ) -> jp.ndarray:
-        """Builds the deployment observation (105 values by default).
+        """Builds the deployment observation (107 values by default).
 
         With the default 12-frame history, the layout is:
           0:96   normalized command history, oldest to newest
@@ -1332,19 +1413,38 @@ class Joystick(mjx_env.MjxEnv):
           99:102 scaled gyroscope in IMU coordinates
           102:104 sin/cos gait clock
           104     commanded speed in m/s
+          105:107 sin/cos estimated heading minus heading at START (optional)
         """
         clock = jp.array([jp.sin(phase), jp.cos(phase)])
+        parts = [
+            command_history.flatten(),
+            gravity_estimate,
+            self._gyro_obs_scale * gyro_measurement,
+            clock,
+            jp.array([self._target_velocity]),
+        ]
+        if self._heading_observation:
+            parts.append(jp.array([jp.sin(heading_error), jp.cos(heading_error)]))
         return jp.clip(
-            jp.concatenate([
-                command_history.flatten(),
-                gravity_estimate,
-                self._gyro_obs_scale * gyro_measurement,
-                clock,
-                jp.array([self._target_velocity]),
-            ]),
+            jp.concatenate(parts),
             -10.0,
             10.0,
         )
+
+    def _update_cycle_velocity(self, history, count, velocity):
+        """Sliding full-period mean; no partial-window startup penalty."""
+        history = jp.concatenate([history[1:], velocity[None]], axis=0)
+        count = jp.minimum(count + 1, self._cycle_window)
+        ready = count == self._cycle_window
+        mean = self._cycle_weights @ history
+        return history, count, jp.where(ready, mean, jp.zeros(2)), ready
+
+    @staticmethod
+    def _heading_from_quat(quat: jp.ndarray) -> jp.ndarray:
+        """Yaw of the IMU's -Y forward axis projected onto the world floor."""
+        w, x, y, z = quat
+        return jp.arctan2(2.0 * (w * z - x * y),
+                         1.0 - 2.0 * (x * x + z * z))
 
     @staticmethod
     def _sample_uniform(
