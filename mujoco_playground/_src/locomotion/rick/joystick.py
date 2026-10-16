@@ -108,9 +108,9 @@ def default_config() -> config_dict.ConfigDict:
         # Task rewards.
         'velocity_tracking_weight': 4.0,
         'tracking_sigma': 0.0025,
-        'sideways_velocity_cost_weight': 0.05,
+        'sideways_velocity_cost_weight': 0.2,
         'yaw_rate_cost_weight': 0.4,
-        'heading_cost_weight': 2.0,
+        'heading_cost_weight': 4.0,
         'orientation_cost_weight': 0.3,
         'roll_pitch_rate_cost_weight': 0.05,
         'action_rate_cost_weight': 0.05,
