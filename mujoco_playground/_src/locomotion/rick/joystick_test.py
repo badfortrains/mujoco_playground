@@ -54,19 +54,75 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
     self.assertEqual(config.swing_foot_height, 0.0081)
     self.assertTrue(config.foot_height_uses_sole_clearance)
-    self.assertEqual(config.foot_phase_reward_weight, 1.5)
-    self.assertEqual(config.foot_height_tracking_sigma, 4.6e-5)
-    self.assertEqual(config.swing_lift_reward_weight, 2.0)
-    self.assertEqual(config.swing_lift_contact_depth, 0.005)
-    self.assertEqual(config.swing_lift_target_clearance, 0.0067)
-    self.assertEqual(config.swing_airborne_reward_weight, 1.0)
-    self.assertEqual(config.swing_foot_clearance, 0.0047)
+    self.assertEqual(config.foot_height_reward, 'linear')
+    self.assertEqual(config.foot_phase_reward_weight, 4.0)
     self.assertEqual(config.base_height_tracking_sigma, 1.8e-4)
     self.assertEqual(tuple(config.healthy_z_range), (0.034, 0.135))
-    self.assertEqual(config.velocity_tracking_weight, 4.0)
+    self.assertEqual(config.velocity_tracking_weight, 2.0)
     self.assertEqual(config.yaw_rate_cost_weight, 0.4)
     self.assertEqual(config.heading_cost_weight, 2.0)
     self.assertEqual(config.orientation_cost_weight, 0.3)
+
+  def test_linear_height_penalty_rewards_progress_and_penalizes_overshoot(self):
+    self.env._foot_height_reward = 'linear'
+    self.env._foot_phase_reward_weight = 4.0
+    self.env._swing_foot_height = 0.0081
+    reward = jax.jit(self.env._get_foot_height_rewards)
+    h = self.env._swing_foot_height
+    def score(left, right=0.0):
+      heights = jp.array([left, right])
+      values = reward(jp.array(jp.pi / 2), heights,
+                      jp.array([True, True]), heights, heights)
+      self.assertEqual(float(values[1]), 0.0)
+      self.assertEqual(float(values[2]), 0.0)
+      return float(values[0])
+    self.assertAlmostEqual(score(0), -4.0, places=5)
+    self.assertAlmostEqual(score(h / 2), -2.0, places=5)
+    self.assertAlmostEqual(score(h), 0.0, places=5)
+    self.assertAlmostEqual(score(2 * h), -4.0, places=5)
+    self.assertLess(score(-h), score(0))
+    self.assertLess(score(h, h), score(h, 0))
+    # Far-off errors still have a nonzero improvement signal.
+    self.assertGreater(score(-9 * h), score(-10 * h))
+
+  def test_linear_height_penalty_tracks_phase_and_lowest_corner(self):
+    self.env._foot_height_reward = 'linear'
+    self.env._foot_phase_reward_weight = 4.0
+    self.env._swing_foot_height = 0.0081
+    reward = jax.jit(self.env._get_foot_height_rewards)
+    for phase in (0.0, 0.4, 1.57, 3.14, 4.71, 6.28):
+      desired = self.env._desired_foot_heights(jp.array(phase))
+      for contact in (True, False):
+        actual = reward(jp.array(phase), desired, jp.array([contact, contact]),
+                        desired, desired)
+        self.assertAlmostEqual(float(actual[0]), 0.0, places=5)
+    phase = jp.array(jp.pi / 2)
+    toe = jp.array([0.0081, 0.0])
+    heel = jp.zeros(2)
+    actual = reward(phase, toe, jp.array([False, True]), toe, heel)
+    self.assertAlmostEqual(float(actual[0]), -4.0, places=5)
+    # At the opposite half-cycle the other foot must rise.
+    actual = reward(phase + jp.pi, toe, jp.array([False, True]), toe, toe)
+    self.assertAlmostEqual(float(actual[0]), -8.0, places=5)
+
+  def test_legacy_height_rewards_keep_all_three_terms(self):
+    self.env._foot_height_reward = 'legacy'
+    self.env._foot_phase_reward_weight = 1.5
+    self.env._swing_foot_height = 0.012
+    self.env._foot_height_tracking_sigma = 1e-4
+    self.env._swing_lift_reward_weight = 2.0
+    self.env._swing_lift_contact_depth = 0.005
+    self.env._swing_lift_target_clearance = 0.010
+    self.env._swing_airborne_reward_weight = 1.0
+    self.env._swing_foot_clearance = 0.007
+    phase = jp.array(jp.pi / 2)
+    heights = jp.array([0.006, 0.0])
+    values = jax.jit(self.env._get_foot_height_rewards)(
+        phase, heights, jp.array([False, True]), heights, heights
+    )
+    np.testing.assert_allclose(values, [1.5 * np.exp(-0.36),
+                                       2 * 0.011 / 0.015, 0.006 / 0.007],
+                               rtol=1e-6)
 
   def test_lift_reward_increases_before_contact_release_and_is_bounded(self):
     self.env._swing_lift_reward_weight = 2.0
