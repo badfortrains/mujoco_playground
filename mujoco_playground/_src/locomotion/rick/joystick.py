@@ -43,7 +43,7 @@ def default_config() -> config_dict.ConfigDict:
 
         # Policy command and gait parameters.
         'target_velocity': 0.050,
-        'action_scale': 0.40,
+        'action_scale': 0.50,
         'step_frequency': 1.5,
 
         # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
@@ -119,14 +119,14 @@ def default_config() -> config_dict.ConfigDict:
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 2.0,
         'orientation_cost_weight': 1.2,
-        'roll_pitch_rate_cost_weight': 0.05,
-        'action_rate_cost_weight': 0.05,
-        'action_acceleration_cost_weight': 0.02,
+        'roll_pitch_rate_cost_weight': 0.02,
+        'action_rate_cost_weight': 0.03,
+        'action_acceleration_cost_weight': 0.01,
         # Penalize changes inside the episode's sampled MG90S deadband so the
         # policy learns to hold or make a change the real servo can execute.
         'servo_deadband_cost_weight': 0.01,
         'healthy_reward': 0.20,
-        'vertical_velocity_cost_weight': 0.05,
+        'vertical_velocity_cost_weight': 0.02,
 
         # Reward swing clearance only with opposite-foot support, capped at
         # the target. Keep the pre-liftoff unloading signal even without support.
@@ -135,19 +135,18 @@ def default_config() -> config_dict.ConfigDict:
         # planted flat while the swing foot lifts level rather than toe-pivoting.
         # Flight is penalized at every phase, including foot exchange.
         'foot_height_reward': 'supported_clearance',
-        'foot_phase_reward_weight': 4.0,
+        'foot_phase_reward_weight': 5.0,
         'stance_foot_height_cost_weight': 0.5,
         'swing_sole_tilt_cost_weight': 0.5,
         'contact_phase_cost_weight': 1.0,
         'flight_cost_weight': 1.0,
         'foot_height_uses_sole_clearance': True,
-        # 12 mm scaled by ROBO_v25/v4Robot_v81 standing height (0.6745).
-        'swing_foot_height': 0.0081,
-        'swing_lift_reward_weight': 1.5,
+        'swing_foot_height': 0.014,
+        'swing_lift_reward_weight': 2.0,
         'swing_lift_contact_depth': 0.004,
-        'swing_lift_target_clearance': 0.007,
-        'swing_airborne_reward_weight': 1.0,
-        'swing_foot_clearance': 0.0047,
+        'swing_lift_target_clearance': 0.012,
+        'swing_airborne_reward_weight': 2.0,
+        'swing_foot_clearance': 0.010,
         # During each swing, move the foot 20 mm from behind to ahead of its
         # nominal COM-relative position.  At the target speed/frequency this
         # matches the distance the COM travels during one stance.
@@ -155,7 +154,7 @@ def default_config() -> config_dict.ConfigDict:
         'swing_foot_forward_distance': 0.020,
         'swing_foot_forward_tracking_sigma': 4.0e-4,  # (20 mm)^2.
         'swing_foot_forward_uses_com': True,
-        'foot_slip_cost_weight': 20.0,
+        'foot_slip_cost_weight': 12.0,
         'base_height_cost_weight': 0.0,
         'base_height_tracking_sigma': 1.8e-4,
         'energy_cost_weight': 0.005,
