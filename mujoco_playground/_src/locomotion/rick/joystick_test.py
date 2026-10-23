@@ -54,15 +54,75 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
     self.assertEqual(config.swing_foot_height, 0.0081)
     self.assertTrue(config.foot_height_uses_sole_clearance)
-    self.assertEqual(config.foot_height_reward, 'phase_clearance')
+    self.assertEqual(config.foot_height_reward, 'supported_clearance')
     self.assertEqual(config.foot_phase_reward_weight, 4.0)
     self.assertEqual(config.stance_foot_height_cost_weight, 0.5)
+    self.assertEqual(config.flight_cost_weight, 1.0)
     self.assertEqual(config.base_height_tracking_sigma, 1.8e-4)
     self.assertEqual(tuple(config.healthy_z_range), (0.034, 0.135))
     self.assertEqual(config.velocity_tracking_weight, 2.0)
     self.assertEqual(config.yaw_rate_cost_weight, 0.4)
     self.assertEqual(config.heading_cost_weight, 2.0)
     self.assertEqual(config.orientation_cost_weight, 0.3)
+
+  def _supported_clearance_reward(self):
+    self.env._foot_height_reward = 'supported_clearance'
+    self.env._foot_phase_reward_weight = 4.0
+    self.env._stance_foot_height_cost_weight = 0.5
+    self.env._flight_cost_weight = 1.0
+    self.env._swing_foot_height = 0.0081
+    return jax.jit(self.env._get_foot_height_rewards)
+
+  def test_supported_clearance_requires_opposite_contact_on_both_sides(self):
+    reward = self._supported_clearance_reward()
+    h = self.env._swing_foot_height
+    for swing_index, phase in ((0, jp.pi / 2), (1, -jp.pi / 2)):
+      for fraction, expected in ((0.0, 0.0), (0.5, 2.0), (1.0, 4.0), (2.0, 4.0)):
+        heights = jp.zeros(2).at[swing_index].set(fraction * h)
+        contacts = jp.array([True, True]).at[swing_index].set(False)
+        values = reward(jp.array(phase), heights, contacts, heights, heights)
+        np.testing.assert_allclose(values, [expected, 0, 0], atol=1e-6)
+        # Contact on the swing foot cannot substitute for opposite-foot support.
+        values = reward(jp.array(phase), heights, ~contacts, heights, heights)
+        np.testing.assert_allclose(values, [0, 0, 0], atol=1e-6)
+      heights = jp.full(2, h)
+      values = reward(jp.array(phase), heights, jp.array([False, False]),
+                      heights, heights)
+      np.testing.assert_allclose(values, [-1.5, 0, 0], atol=1e-6)
+
+  def test_supported_clearance_preserves_unloading_with_or_without_support(self):
+    reward = self._supported_clearance_reward()
+    h = self.env._swing_foot_height
+    for contact in ((True, True), (False, True), (True, False), (False, False)):
+      contacts = jp.array(contact)
+      def score(left, right):
+        heights = jp.array([left, right])
+        return float(reward(jp.array(jp.pi / 2), heights, contacts,
+                            heights, heights)[0])
+      # The -4 to -2 improvement survives even if support is absent.
+      self.assertAlmostEqual(score(-h / 2, -h) - score(-h, -h), 2.0, places=5)
+      self.assertAlmostEqual(score(-h, -h / 2), score(-h, -h), places=5)
+      self.assertAlmostEqual(score(0, 0), 0.0 if any(contact) else -1.0, places=5)
+
+  def test_supported_clearance_rejects_tilt_and_penalizes_flight_at_exchange(self):
+    reward = self._supported_clearance_reward()
+    h = self.env._swing_foot_height
+    toe, heel = jp.array([h, 0.0]), jp.zeros(2)
+    values = reward(jp.array(jp.pi / 2), toe, jp.array([False, True]), toe, heel)
+    np.testing.assert_allclose(values, [0, 0, 0], atol=1e-6)
+    for phase in (0.0, jp.pi, 2 * jp.pi):
+      heights = jp.full(2, h)
+      values = reward(jp.array(phase), heights, jp.array([False, False]),
+                      heights, heights)
+      np.testing.assert_allclose(values, [-1, 0, 0], atol=1e-6)
+    heights = jp.array([h, 0.0])
+    values = reward(jp.array(jp.pi / 4), heights, jp.array([False, True]),
+                    heights, heights)
+    np.testing.assert_allclose(values, [2, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(
+        self.env._desired_foot_heights(jp.array(jp.pi / 4)), [h, 0.0])
+    np.testing.assert_allclose(
+        self.env._desired_foot_heights(jp.array(-jp.pi / 4)), [0.0, h])
 
   def test_phase_clearance_rewards_only_scheduled_lift_and_caps_credit(self):
     self.env._foot_height_reward = 'phase_clearance'

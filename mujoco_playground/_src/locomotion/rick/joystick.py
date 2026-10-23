@@ -128,12 +128,14 @@ def default_config() -> config_dict.ConfigDict:
         'healthy_reward': 0.20,
         'vertical_velocity_cost_weight': 0.05,
 
-        # Reward clearance on the scheduled swing foot, capped at the target.
+        # Reward swing clearance only with opposite-foot support, capped at
+        # the target. Keep the pre-liftoff unloading signal even without support.
         # Smooth phase weights emphasize mid-swing and fade at foot exchange.
-        # A small stance-height penalty discourages lifting both feet together.
-        'foot_height_reward': 'phase_clearance',
+        # Flight is penalized at every phase, including foot exchange.
+        'foot_height_reward': 'supported_clearance',
         'foot_phase_reward_weight': 4.0,
         'stance_foot_height_cost_weight': 0.5,
+        'flight_cost_weight': 1.0,
         'foot_height_uses_sole_clearance': True,
         # 12 mm scaled by ROBO_v25/v4Robot_v81 standing height (0.6745).
         'swing_foot_height': 0.0081,
@@ -296,15 +298,21 @@ class Joystick(mjx_env.MjxEnv):
 
         self._foot_phase_reward_weight = config.foot_phase_reward_weight
         self._foot_height_reward = config.get('foot_height_reward', 'legacy')
-        if self._foot_height_reward not in ('phase_clearance', 'linear', 'legacy'):
+        if self._foot_height_reward not in (
+            'supported_clearance', 'phase_clearance', 'linear', 'legacy'
+        ):
             raise ValueError(
-                'foot_height_reward must be phase_clearance, linear, or legacy'
+                'foot_height_reward must be supported_clearance, '
+                'phase_clearance, linear, or legacy'
             )
         self._stance_foot_height_cost_weight = config.get(
             'stance_foot_height_cost_weight', 0.5
         )
         if self._stance_foot_height_cost_weight < 0:
             raise ValueError('stance_foot_height_cost_weight must be nonnegative')
+        self._flight_cost_weight = config.get('flight_cost_weight', 1.0)
+        if self._flight_cost_weight < 0:
+            raise ValueError('flight_cost_weight must be nonnegative')
         # Missing keys preserve the reward used by older saved configs.
         self._foot_height_uses_sole_clearance = config.get(
             'foot_height_uses_sole_clearance', False
@@ -1328,7 +1336,7 @@ class Joystick(mjx_env.MjxEnv):
         self, phase, foot_heights, contacts, toe_clearance, heel_clearance
     ) -> tuple[jp.ndarray, jp.ndarray, jp.ndarray]:
         """Phase-specific clearance credit; archived modes remain reproducible."""
-        if self._foot_height_reward == 'phase_clearance':
+        if self._foot_height_reward in ('supported_clearance', 'phase_clearance'):
             phase_sin = jp.sin(phase + jp.array([0.0, jp.pi]))
             swing = jp.square(jp.maximum(phase_sin, 0.0))
             stance = jp.square(jp.minimum(phase_sin, 0.0))
@@ -1336,11 +1344,21 @@ class Joystick(mjx_env.MjxEnv):
             relative_height = clearance / self._swing_foot_height
             # Keep negative penetration: unloading the scheduled swing foot
             # improves reward before liftoff, without a bonus for ground contact.
+            swing_credit = jp.minimum(relative_height, 1.0)
+            if self._foot_height_reward == 'supported_clearance':
+                opposite_contact = contacts[::-1].astype(relative_height.dtype)
+                swing_credit = jp.minimum(relative_height, 0.0) + (
+                    jp.clip(relative_height, 0.0, 1.0) * opposite_contact
+                )
             reward = self._foot_phase_reward_weight * jp.sum(
-                swing * jp.minimum(relative_height, 1.0)
+                swing * swing_credit
             ) - self._stance_foot_height_cost_weight * jp.sum(
                 stance * jp.maximum(relative_height, 0.0)
             )
+            if self._foot_height_reward == 'supported_clearance':
+                # Include flight in reward_foot_phase, independently of phase.
+                # Preserve archived phase_clearance scores for old checkpoints.
+                reward -= self._flight_cost_weight * (~jp.any(contacts))
             return reward, jp.zeros_like(reward), jp.zeros_like(reward)
         desired = self._desired_foot_heights(phase)
         if self._foot_height_reward == 'linear':
@@ -1653,7 +1671,7 @@ class Joystick(mjx_env.MjxEnv):
     ) -> jp.ndarray:
         foot_phases = phase + jp.array([0.0, jp.pi])
         swing = jp.maximum(jp.sin(foot_phases), 0.0)
-        if self._foot_height_reward == 'phase_clearance':
+        if self._foot_height_reward in ('supported_clearance', 'phase_clearance'):
             # Diagnostics show the clearance cap, not the reward's phase weight.
             return self._swing_foot_height * (swing > 0).astype(swing.dtype)
         return self._swing_foot_height * jp.square(swing)
