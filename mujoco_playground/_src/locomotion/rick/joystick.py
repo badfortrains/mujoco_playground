@@ -112,12 +112,12 @@ def default_config() -> config_dict.ConfigDict:
         # Task rewards.
         'velocity_tracking_weight': 2.0,
         'tracking_sigma': 0.0025,
-        'sideways_velocity_cost_weight': 0.01,
+        'sideways_velocity_cost_weight': 0.02,
         'yaw_rate_cost_weight': 0.4,
         # Average a full gait period BEFORE squaring: alternating sway cancels.
-        'cycle_sideways_velocity_cost_weight': 0.5,
+        'cycle_sideways_velocity_cost_weight': 2.0,
         'cycle_yaw_rate_cost_weight': 4.0,
-        'heading_cost_weight': 2.0,
+        'heading_cost_weight': 3.0,
         'orientation_cost_weight': 1.2,
         'roll_pitch_rate_cost_weight': 0.02,
         'action_rate_cost_weight': 0.03,
