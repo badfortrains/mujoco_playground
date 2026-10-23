@@ -131,10 +131,13 @@ def default_config() -> config_dict.ConfigDict:
         # Reward swing clearance only with opposite-foot support, capped at
         # the target. Keep the pre-liftoff unloading signal even without support.
         # Smooth phase weights emphasize mid-swing and fade at foot exchange.
+        # Contact timing replaces the stance-height penalty: lift the swing
+        # foot while keeping the opposite foot planted.
         # Flight is penalized at every phase, including foot exchange.
         'foot_height_reward': 'supported_clearance',
         'foot_phase_reward_weight': 4.0,
-        'stance_foot_height_cost_weight': 0.5,
+        'stance_foot_height_cost_weight': 0.0,
+        'contact_phase_cost_weight': 1.0,
         'flight_cost_weight': 1.0,
         'foot_height_uses_sole_clearance': True,
         # 12 mm scaled by ROBO_v25/v4Robot_v81 standing height (0.6745).
@@ -310,6 +313,10 @@ class Joystick(mjx_env.MjxEnv):
         )
         if self._stance_foot_height_cost_weight < 0:
             raise ValueError('stance_foot_height_cost_weight must be nonnegative')
+        # Older saved configs retain their original stance-height penalty.
+        self._contact_phase_cost_weight = config.get('contact_phase_cost_weight', 0.0)
+        if self._contact_phase_cost_weight < 0:
+            raise ValueError('contact_phase_cost_weight must be nonnegative')
         self._flight_cost_weight = config.get('flight_cost_weight', 1.0)
         if self._flight_cost_weight < 0:
             raise ValueError('flight_cost_weight must be nonnegative')
@@ -1356,6 +1363,12 @@ class Joystick(mjx_env.MjxEnv):
                 stance * jp.maximum(relative_height, 0.0)
             )
             if self._foot_height_reward == 'supported_clearance':
+                contact = contacts.astype(relative_height.dtype)
+                # Both feet down costs one at mid-swing; wrong-foot support
+                # costs two. Fade at exchange to allow a double-support phase.
+                reward -= self._contact_phase_cost_weight * jp.sum(
+                    swing * contact + stance * (1.0 - contact)
+                )
                 # Include flight in reward_foot_phase, independently of phase.
                 # Preserve archived phase_clearance scores for old checkpoints.
                 reward -= self._flight_cost_weight * (~jp.any(contacts))

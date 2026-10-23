@@ -56,7 +56,9 @@ class JoystickTest(absltest.TestCase):
     self.assertTrue(config.foot_height_uses_sole_clearance)
     self.assertEqual(config.foot_height_reward, 'supported_clearance')
     self.assertEqual(config.foot_phase_reward_weight, 4.0)
-    self.assertEqual(config.stance_foot_height_cost_weight, 0.5)
+    self.assertEqual(config.stance_foot_height_cost_weight, 0.0)
+    self.assertEqual(config.contact_phase_cost_weight, 1.0)
+    self.assertEqual(config.swing_foot_forward_tracking_sigma, 1.0e-4)
     self.assertEqual(config.flight_cost_weight, 1.0)
     self.assertEqual(config.base_height_tracking_sigma, 1.8e-4)
     self.assertEqual(tuple(config.healthy_z_range), (0.034, 0.135))
@@ -69,6 +71,7 @@ class JoystickTest(absltest.TestCase):
     self.env._foot_height_reward = 'supported_clearance'
     self.env._foot_phase_reward_weight = 4.0
     self.env._stance_foot_height_cost_weight = 0.5
+    self.env._contact_phase_cost_weight = 0.0
     self.env._flight_cost_weight = 1.0
     self.env._swing_foot_height = 0.0081
     return jax.jit(self.env._get_foot_height_rewards)
@@ -123,6 +126,54 @@ class JoystickTest(absltest.TestCase):
         self.env._desired_foot_heights(jp.array(jp.pi / 4)), [h, 0.0])
     np.testing.assert_allclose(
         self.env._desired_foot_heights(jp.array(-jp.pi / 4)), [0.0, h])
+
+  def test_contact_phase_penalty_prefers_correct_support_on_both_sides(self):
+    reward = self._supported_clearance_reward()
+    self.env._contact_phase_cost_weight = 1.0
+    self.env._stance_foot_height_cost_weight = 0.0
+    heights = jp.zeros(2)
+    for swing_index, phase in ((0, jp.pi / 2), (1, -jp.pi / 2)):
+      correct = jp.array([True, True]).at[swing_index].set(False)
+      for contacts, expected in (
+          (correct, 0.0), (~correct, -2.0),
+          (jp.array([True, True]), -1.0),
+          (jp.array([False, False]), -2.0),  # Contact error + flight penalty.
+      ):
+        values = reward(jp.array(phase), heights, contacts, heights, heights)
+        np.testing.assert_allclose(values, [expected, 0, 0], atol=1e-6)
+      lifted = heights.at[swing_index].set(self.env._swing_foot_height)
+      values = reward(jp.array(phase), lifted, correct, lifted, lifted)
+      np.testing.assert_allclose(values, [4, 0, 0], atol=1e-6)
+      both_lifted = jp.full(2, self.env._swing_foot_height)
+      values = reward(jp.array(phase), both_lifted, jp.array([False, False]),
+                      both_lifted, both_lifted)
+      np.testing.assert_allclose(values, [-2, 0, 0], atol=1e-6)
+
+  def test_contact_phase_penalty_fades_at_exchange_and_preserves_unloading(self):
+    reward = self._supported_clearance_reward()
+    self.env._contact_phase_cost_weight = 1.0
+    self.env._stance_foot_height_cost_weight = 0.0
+    heights = jp.zeros(2)
+    for phase, expected in ((0.0, 0.0), (jp.pi / 4, -0.5),
+                            (jp.pi, 0.0), (2 * jp.pi, 0.0)):
+      values = reward(jp.array(phase), heights, jp.array([True, True]),
+                      heights, heights)
+      np.testing.assert_allclose(values, [expected, 0, 0], atol=1e-6)
+    for contact in ((True, True), (False, True), (True, False), (False, False)):
+      scores = []
+      for fraction in (-1.0, -0.5):
+        h = jp.array([fraction, -1.0]) * self.env._swing_foot_height
+        scores.append(float(reward(jp.array(jp.pi / 2), h, jp.array(contact),
+                                   h, h)[0]))
+      self.assertAlmostEqual(scores[1] - scores[0], 2.0, places=5)
+    values = reward(jp.array(0.0), heights, jp.array([False, False]),
+                    heights, heights)
+    np.testing.assert_allclose(values, [-1, 0, 0], atol=1e-6)
+    # Raising only a toe still earns no clearance bonus.
+    toe = jp.array([self.env._swing_foot_height, 0.0])
+    values = reward(jp.array(jp.pi / 2), toe, jp.array([False, True]),
+                    toe, heights)
+    np.testing.assert_allclose(values, [0, 0, 0], atol=1e-6)
 
   def test_phase_clearance_rewards_only_scheduled_lift_and_caps_credit(self):
     self.env._foot_height_reward = 'phase_clearance'
