@@ -156,7 +156,7 @@ def default_config() -> config_dict.ConfigDict:
         # Termination.
         'terminate_when_unhealthy': True,
         'healthy_z_range': (0.034, 0.135),
-        'minimum_upright': 0.50,
+        'minimum_upright': 0.30,
     })
 
 
