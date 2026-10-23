@@ -42,9 +42,9 @@ def default_config() -> config_dict.ConfigDict:
         'njmax': 96,
 
         # Policy command and gait parameters.
-        'target_velocity': 0.068,
+        'target_velocity': 0.050,
         'action_scale': 0.40,
-        'step_frequency': 1.2,
+        'step_frequency': 1.5,
 
         # Twelve commands = 240 ms of controller-known history at 50 Hz.  This
         # is the policy's only proxy for joint state on feedback-free servos.
@@ -112,13 +112,13 @@ def default_config() -> config_dict.ConfigDict:
         # Task rewards.
         'velocity_tracking_weight': 2.0,
         'tracking_sigma': 0.0025,
-        'sideways_velocity_cost_weight': 0.05,
+        'sideways_velocity_cost_weight': 0.01,
         'yaw_rate_cost_weight': 0.4,
         # Average a full gait period BEFORE squaring: alternating sway cancels.
         'cycle_sideways_velocity_cost_weight': 0.5,
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 2.0,
-        'orientation_cost_weight': 0.3,
+        'orientation_cost_weight': 1.2,
         'roll_pitch_rate_cost_weight': 0.05,
         'action_rate_cost_weight': 0.05,
         'action_acceleration_cost_weight': 0.02,
@@ -131,23 +131,30 @@ def default_config() -> config_dict.ConfigDict:
         # Reward swing clearance only with opposite-foot support, capped at
         # the target. Keep the pre-liftoff unloading signal even without support.
         # Smooth phase weights emphasize mid-swing and fade at foot exchange.
-        # Contact timing replaces the stance-height penalty: lift the swing
-        # foot while keeping the opposite foot planted.
+        # Contact timing and stance-height penalties keep the support foot
+        # planted flat while the swing foot lifts level rather than toe-pivoting.
         # Flight is penalized at every phase, including foot exchange.
         'foot_height_reward': 'supported_clearance',
         'foot_phase_reward_weight': 4.0,
-        'stance_foot_height_cost_weight': 0.0,
+        'stance_foot_height_cost_weight': 0.5,
+        'swing_sole_tilt_cost_weight': 0.5,
         'contact_phase_cost_weight': 1.0,
         'flight_cost_weight': 1.0,
         'foot_height_uses_sole_clearance': True,
         # 12 mm scaled by ROBO_v25/v4Robot_v81 standing height (0.6745).
         'swing_foot_height': 0.0081,
-        # During each swing, move the foot 30 mm from behind to ahead of its
-        # nominal body-relative position.  At the target speed/frequency this
-        # roughly matches the distance the body travels during one stance.
-        'swing_foot_forward_reward_weight': 1,
-        'swing_foot_forward_distance': 0.030,
-        'swing_foot_forward_tracking_sigma': 1.0e-4,  # (10 mm)^2.
+        'swing_lift_reward_weight': 1.5,
+        'swing_lift_contact_depth': 0.004,
+        'swing_lift_target_clearance': 0.007,
+        'swing_airborne_reward_weight': 1.0,
+        'swing_foot_clearance': 0.0047,
+        # During each swing, move the foot 20 mm from behind to ahead of its
+        # nominal COM-relative position.  At the target speed/frequency this
+        # matches the distance the COM travels during one stance.
+        'swing_foot_forward_reward_weight': 2.0,
+        'swing_foot_forward_distance': 0.020,
+        'swing_foot_forward_tracking_sigma': 4.0e-4,  # (20 mm)^2.
+        'swing_foot_forward_uses_com': True,
         'foot_slip_cost_weight': 20.0,
         'base_height_cost_weight': 0.0,
         'base_height_tracking_sigma': 1.8e-4,
@@ -156,7 +163,7 @@ def default_config() -> config_dict.ConfigDict:
         # Termination.
         'terminate_when_unhealthy': True,
         'healthy_z_range': (0.034, 0.135),
-        'minimum_upright': 0.30,
+        'minimum_upright': 0.70,
     })
 
 
@@ -313,6 +320,11 @@ class Joystick(mjx_env.MjxEnv):
         )
         if self._stance_foot_height_cost_weight < 0:
             raise ValueError('stance_foot_height_cost_weight must be nonnegative')
+        self._swing_sole_tilt_cost_weight = config.get(
+            'swing_sole_tilt_cost_weight', 0.0
+        )
+        if self._swing_sole_tilt_cost_weight < 0:
+            raise ValueError('swing_sole_tilt_cost_weight must be nonnegative')
         # Older saved configs retain their original stance-height penalty.
         self._contact_phase_cost_weight = config.get('contact_phase_cost_weight', 0.0)
         if self._contact_phase_cost_weight < 0:
@@ -355,6 +367,9 @@ class Joystick(mjx_env.MjxEnv):
         )
         self._swing_foot_forward_tracking_sigma = (
             config.swing_foot_forward_tracking_sigma
+        )
+        self._swing_foot_forward_uses_com = config.get(
+            'swing_foot_forward_uses_com', False
         )
         self._foot_slip_cost_weight = config.foot_slip_cost_weight
         self._base_height_cost_weight = config.base_height_cost_weight
@@ -439,9 +454,14 @@ class Joystick(mjx_env.MjxEnv):
         self._nominal_base_height = default_data.subtree_com[
             self._body_idx, 2
         ]
+        default_forward_reference = (
+            default_data.subtree_com[self._body_idx]
+            if self._swing_foot_forward_uses_com
+            else default_data.xpos[self._body_idx]
+        )
         default_foot_offsets = (
             jp.array(default_data.site_xpos)[self._feet_site_ids]
-            - jp.array(default_data.xpos[self._body_idx])
+            - jp.array(default_forward_reference)
         )
         self._nominal_foot_forward_positions = (
             default_foot_offsets @ self._forward_world
@@ -1014,15 +1034,20 @@ class Joystick(mjx_env.MjxEnv):
             else jp.maximum(foot_positions_after[:, 2], 0.0)
         )
 
-        # Track both feet relative to the body: advance during swing and
+        # Track both feet relative to the body/COM: advance during swing and
         # retract at constant speed during stance as the body moves forward.
+        forward_reference_after = (
+            com_after
+            if self._swing_foot_forward_uses_com
+            else data.xpos[self._body_idx]
+        )
         (
             swing_foot_forward_reward,
             foot_forward_positions,
             desired_foot_forward_positions,
         ) = self._get_swing_foot_forward_reward(
             foot_positions_after,
-            data.xpos[self._body_idx],
+            forward_reference_after,
             body_forward_xy,
             phase,
         )
@@ -1369,10 +1394,25 @@ class Joystick(mjx_env.MjxEnv):
                 reward -= self._contact_phase_cost_weight * jp.sum(
                     swing * contact + stance * (1.0 - contact)
                 )
+                # Penalize heel-up/toe-down sole pitching during swing so the
+                # policy lifts the whole foot rather than pivoting on its toe.
+                sole_tilt = (
+                    jp.abs(toe_clearance - heel_clearance)
+                    / self._swing_foot_height
+                )
+                reward -= self._swing_sole_tilt_cost_weight * jp.sum(
+                    swing * jp.minimum(sole_tilt, 2.0)
+                )
                 # Include flight in reward_foot_phase, independently of phase.
                 # Preserve archived phase_clearance scores for old checkpoints.
                 reward -= self._flight_cost_weight * (~jp.any(contacts))
-            return reward, jp.zeros_like(reward), jp.zeros_like(reward)
+            return (
+                reward,
+                self._get_swing_lift_reward(phase, toe_clearance, heel_clearance),
+                self._get_swing_airborne_reward(
+                    phase, contacts, toe_clearance, heel_clearance
+                ),
+            )
         desired = self._desired_foot_heights(phase)
         if self._foot_height_reward == 'linear':
             # Use sole clearance even if a caller overrides the legacy site flag.
