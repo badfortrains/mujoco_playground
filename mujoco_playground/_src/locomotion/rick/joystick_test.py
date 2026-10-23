@@ -38,7 +38,7 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(tuple(config.foot_friction_range), (0.20, 0.60))
     self.assertEqual(
         tuple(config.center_of_mass_offset_scale),
-        (0.005, 0.005, 0.003),
+        (0.005, 0.005, 0.0020),
     )
     self.assertEqual(tuple(config.servo_stiffness_range), (1.0, 1.0))
     self.assertEqual(
@@ -46,17 +46,23 @@ class JoystickTest(absltest.TestCase):
     )
     self.assertEqual(tuple(config.servo_backlash_range_us), (5.0, 20.0))
     self.assertEqual(config.action_noise_scale, 0.01)
+    self.assertEqual(
+        tuple(config.root_position_noise_scale),
+        (0.002, 0.002, 0.0007),
+    )
     self.assertEqual(config.joint_position_noise_scale, 0.03)
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
-    self.assertEqual(config.swing_foot_height, 0.012)
+    self.assertEqual(config.swing_foot_height, 0.0081)
     self.assertTrue(config.foot_height_uses_sole_clearance)
     self.assertEqual(config.foot_phase_reward_weight, 1.5)
-    self.assertEqual(config.foot_height_tracking_sigma, 1.0e-4)
+    self.assertEqual(config.foot_height_tracking_sigma, 4.6e-5)
     self.assertEqual(config.swing_lift_reward_weight, 2.0)
     self.assertEqual(config.swing_lift_contact_depth, 0.005)
-    self.assertEqual(config.swing_lift_target_clearance, 0.010)
+    self.assertEqual(config.swing_lift_target_clearance, 0.0067)
     self.assertEqual(config.swing_airborne_reward_weight, 1.0)
-    self.assertEqual(config.swing_foot_clearance, 0.007)
+    self.assertEqual(config.swing_foot_clearance, 0.0047)
+    self.assertEqual(config.base_height_tracking_sigma, 1.8e-4)
+    self.assertEqual(tuple(config.healthy_z_range), (0.034, 0.135))
     self.assertEqual(config.velocity_tracking_weight, 4.0)
     self.assertEqual(config.yaw_rate_cost_weight, 0.4)
     self.assertEqual(config.heading_cost_weight, 2.0)

@@ -83,11 +83,11 @@ def default_config() -> config_dict.ConfigDict:
         # Because Rick's link frames are aligned in the nominal pose, this
         # shifts the whole-robot COM by approximately the sampled offset while
         # preserving the relative mass contribution of each link.
-        'center_of_mass_offset_scale': (0.005, 0.005, 0.003),  # m.
+        'center_of_mass_offset_scale': (0.005, 0.005, 0.0020),  # m.
 
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
-        'root_position_noise_scale': (0.002, 0.002, 0.001),  # m.
+        'root_position_noise_scale': (0.002, 0.002, 0.0007),  # m.
         'root_tilt_noise_scale': 0.08,  # rad
         'joint_position_noise_scale': 0.03,  # rad.
         'root_linear_velocity_noise_scale': 0.02,  # m/s.
@@ -128,21 +128,24 @@ def default_config() -> config_dict.ConfigDict:
         'healthy_reward': 0.20,
         'vertical_velocity_cost_weight': 0.05,
 
-        # Track the lowest sole corner, not the foot-center site's height.
+        # ROBO_v25 is 162.6 mm tall in its basic pose, versus 241.1 mm for
+        # v4Robot_v81.  Scale vertical lengths by 0.6745 and squared-error
+        # tolerances by 0.6745**2.  Track the lowest sole corner, not the
+        # foot-center site's height.
         'foot_phase_reward_weight': 1.5,
         'foot_height_uses_sole_clearance': True,
-        'swing_foot_height': 0.012,
-        # Summed two-foot error with a 10 mm tracking tolerance.
-        'foot_height_tracking_sigma': 1.0e-4,
+        'swing_foot_height': 0.0081,
+        # Summed two-foot error with a 6.8 mm tracking tolerance.
+        'foot_height_tracking_sigma': 4.6e-5,
         # Reward partial lifting before contact releases. The starting depth
-        # covers the 3--4 mm sole penetration observed in standing rollouts.
+        # covers contact-solver penetration and therefore is not height-scaled.
         'swing_lift_reward_weight': 2.0,
         'swing_lift_contact_depth': 0.005,
-        'swing_lift_target_clearance': 0.010,
+        'swing_lift_target_clearance': 0.0067,
         # Extra credit only for a genuinely airborne swing foot.  The lowest
-        # sole corner must clear 7 mm for full credit.
+        # sole corner must clear 4.7 mm for full credit.
         'swing_airborne_reward_weight': 1.0,
-        'swing_foot_clearance': 0.007,
+        'swing_foot_clearance': 0.0047,
         # During each swing, move the foot 30 mm from behind to ahead of its
         # nominal body-relative position.  At the target speed/frequency this
         # roughly matches the distance the body travels during one stance.
@@ -151,12 +154,12 @@ def default_config() -> config_dict.ConfigDict:
         'swing_foot_forward_tracking_sigma': 1.0e-4,  # (10 mm)^2.
         'foot_slip_cost_weight': 20.0,
         'base_height_cost_weight': 0.0,
-        'base_height_tracking_sigma': 4.0e-4,
+        'base_height_tracking_sigma': 1.8e-4,
         'energy_cost_weight': 0.005,
 
         # Termination.
         'terminate_when_unhealthy': True,
-        'healthy_z_range': (0.05, 0.20),
+        'healthy_z_range': (0.034, 0.135),
         'minimum_upright': 0.50,
     })
 
