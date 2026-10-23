@@ -54,14 +54,61 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.swing_foot_forward_distance, 0.030)
     self.assertEqual(config.swing_foot_height, 0.0081)
     self.assertTrue(config.foot_height_uses_sole_clearance)
-    self.assertEqual(config.foot_height_reward, 'linear')
+    self.assertEqual(config.foot_height_reward, 'phase_clearance')
     self.assertEqual(config.foot_phase_reward_weight, 4.0)
+    self.assertEqual(config.stance_foot_height_cost_weight, 0.5)
     self.assertEqual(config.base_height_tracking_sigma, 1.8e-4)
     self.assertEqual(tuple(config.healthy_z_range), (0.034, 0.135))
     self.assertEqual(config.velocity_tracking_weight, 2.0)
     self.assertEqual(config.yaw_rate_cost_weight, 0.4)
     self.assertEqual(config.heading_cost_weight, 2.0)
     self.assertEqual(config.orientation_cost_weight, 0.3)
+
+  def test_phase_clearance_rewards_only_scheduled_lift_and_caps_credit(self):
+    self.env._foot_height_reward = 'phase_clearance'
+    self.env._foot_phase_reward_weight = 4.0
+    self.env._stance_foot_height_cost_weight = 0.5
+    self.env._swing_foot_height = 0.0081
+    reward = jax.jit(self.env._get_foot_height_rewards)
+    h = self.env._swing_foot_height
+    def score(left, right=0.0, phase=jp.pi / 2):
+      heights = jp.array([left, right])
+      values = reward(jp.array(phase), heights, jp.array([True, True]),
+                      heights, heights)
+      self.assertEqual(float(values[1]), 0.0)
+      self.assertEqual(float(values[2]), 0.0)
+      return float(values[0])
+    self.assertAlmostEqual(score(0), 0.0, places=5)
+    self.assertAlmostEqual(score(h / 2), 2.0, places=5)
+    self.assertAlmostEqual(score(h), 4.0, places=5)
+    self.assertAlmostEqual(score(2 * h), 4.0, places=5)
+    self.assertAlmostEqual(score(0, h), -0.5, places=5)
+    self.assertAlmostEqual(score(h, h), 3.5, places=5)
+    self.assertAlmostEqual(score(h, 2 * h), 3.0, places=5)
+    self.assertAlmostEqual(score(0, h, phase=3 * jp.pi / 2), 4.0, places=5)
+    # Under the floor, only unloading the scheduled swing foot earns progress.
+    self.assertGreater(score(-h / 2, -h), score(-h, -h))
+    self.assertAlmostEqual(score(-h, -h / 2), score(-h, -h), places=5)
+    # Smooth phase weighting fades to zero at foot exchanges.
+    self.assertAlmostEqual(score(h, 0, phase=jp.pi / 4), 2.0, places=5)
+    for phase in (0.0, jp.pi, 2 * jp.pi):
+      self.assertAlmostEqual(score(h, h, phase=phase), 0.0, places=5)
+
+  def test_phase_clearance_uses_lowest_corner_and_reports_clearance_cap(self):
+    self.env._foot_height_reward = 'phase_clearance'
+    self.env._foot_phase_reward_weight = 4.0
+    self.env._stance_foot_height_cost_weight = 0.5
+    self.env._swing_foot_height = 0.0081
+    reward = jax.jit(self.env._get_foot_height_rewards)
+    toe = jp.array([0.0081, 0.0])
+    for contact in (True, False):
+      values = reward(jp.array(jp.pi / 2), toe,
+                      jp.array([contact, True]), toe, jp.zeros(2))
+      self.assertAlmostEqual(float(values[0]), 0.0, places=5)
+    np.testing.assert_allclose(
+        self.env._desired_foot_heights(jp.array(jp.pi / 4)), [0.0081, 0.0])
+    np.testing.assert_allclose(
+        self.env._desired_foot_heights(jp.array(5 * jp.pi / 4)), [0.0, 0.0081])
 
   def test_linear_height_penalty_rewards_progress_and_penalizes_overshoot(self):
     self.env._foot_height_reward = 'linear'

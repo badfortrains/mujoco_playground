@@ -128,12 +128,12 @@ def default_config() -> config_dict.ConfigDict:
         'healthy_reward': 0.20,
         'vertical_velocity_cost_weight': 0.05,
 
-        # One height objective: negative summed absolute error / peak height.
-        # The lowest sole corner tracks a smooth swing arc and zero in stance.
-        # No Gaussian, contact gate, or separate partial-lift bonus. A grounded
-        # swing foot at mid-swing costs the full weight; perfect tracking is 0.
-        'foot_height_reward': 'linear',
+        # Reward clearance on the scheduled swing foot, capped at the target.
+        # Smooth phase weights emphasize mid-swing and fade at foot exchange.
+        # A small stance-height penalty discourages lifting both feet together.
+        'foot_height_reward': 'phase_clearance',
         'foot_phase_reward_weight': 4.0,
+        'stance_foot_height_cost_weight': 0.5,
         'foot_height_uses_sole_clearance': True,
         # 12 mm scaled by ROBO_v25/v4Robot_v81 standing height (0.6745).
         'swing_foot_height': 0.0081,
@@ -296,12 +296,19 @@ class Joystick(mjx_env.MjxEnv):
 
         self._foot_phase_reward_weight = config.foot_phase_reward_weight
         self._foot_height_reward = config.get('foot_height_reward', 'legacy')
-        if self._foot_height_reward not in ('linear', 'legacy'):
-            raise ValueError('foot_height_reward must be linear or legacy')
+        if self._foot_height_reward not in ('phase_clearance', 'linear', 'legacy'):
+            raise ValueError(
+                'foot_height_reward must be phase_clearance, linear, or legacy'
+            )
+        self._stance_foot_height_cost_weight = config.get(
+            'stance_foot_height_cost_weight', 0.5
+        )
+        if self._stance_foot_height_cost_weight < 0:
+            raise ValueError('stance_foot_height_cost_weight must be nonnegative')
         # Missing keys preserve the reward used by older saved configs.
         self._foot_height_uses_sole_clearance = config.get(
             'foot_height_uses_sole_clearance', False
-        ) or self._foot_height_reward == 'linear'
+        ) or self._foot_height_reward != 'legacy'
         self._swing_foot_height = config.swing_foot_height
         if self._swing_foot_height <= 0:
             raise ValueError('swing_foot_height must be positive')
@@ -1320,7 +1327,21 @@ class Joystick(mjx_env.MjxEnv):
     def _get_foot_height_rewards(
         self, phase, foot_heights, contacts, toe_clearance, heel_clearance
     ) -> tuple[jp.ndarray, jp.ndarray, jp.ndarray]:
-        """One dense height penalty; old configs retain their original rewards."""
+        """Phase-specific clearance credit; archived modes remain reproducible."""
+        if self._foot_height_reward == 'phase_clearance':
+            phase_sin = jp.sin(phase + jp.array([0.0, jp.pi]))
+            swing = jp.square(jp.maximum(phase_sin, 0.0))
+            stance = jp.square(jp.minimum(phase_sin, 0.0))
+            clearance = jp.minimum(toe_clearance, heel_clearance)
+            relative_height = clearance / self._swing_foot_height
+            # Keep negative penetration: unloading the scheduled swing foot
+            # improves reward before liftoff, without a bonus for ground contact.
+            reward = self._foot_phase_reward_weight * jp.sum(
+                swing * jp.minimum(relative_height, 1.0)
+            ) - self._stance_foot_height_cost_weight * jp.sum(
+                stance * jp.maximum(relative_height, 0.0)
+            )
+            return reward, jp.zeros_like(reward), jp.zeros_like(reward)
         desired = self._desired_foot_heights(phase)
         if self._foot_height_reward == 'linear':
             # Use sole clearance even if a caller overrides the legacy site flag.
@@ -1632,6 +1653,9 @@ class Joystick(mjx_env.MjxEnv):
     ) -> jp.ndarray:
         foot_phases = phase + jp.array([0.0, jp.pi])
         swing = jp.maximum(jp.sin(foot_phases), 0.0)
+        if self._foot_height_reward == 'phase_clearance':
+            # Diagnostics show the clearance cap, not the reward's phase weight.
+            return self._swing_foot_height * (swing > 0).astype(swing.dtype)
         return self._swing_foot_height * jp.square(swing)
 
     def _desired_foot_forward_positions(
