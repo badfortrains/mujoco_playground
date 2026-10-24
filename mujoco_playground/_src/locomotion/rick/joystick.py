@@ -455,14 +455,17 @@ class Joystick(mjx_env.MjxEnv):
         self._nominal_base_height = default_data.subtree_com[
             self._body_idx, 2
         ]
-        # Characteristic physical scales derived from the robot's XML COM height
-        # and inverted-pendulum dynamics under gravity (g = 9.81 m/s^2).
-        base_h = float(self._nominal_base_height)
-        self._natural_clearance_scale = 0.10 * base_h
-        self._natural_contact_depth = 0.04 * base_h
+        # Characteristic physical scales derived from the robot's XML leg length
+        # (hip/torso origin above the standing soles) and pendulum dynamics.
+        nominal_foot_z = float(
+            np.mean(default_data.site_xpos[np.asarray(self._feet_site_ids), 2])
+        )
+        leg_length = float(default_data.xpos[self._body_idx, 2]) - nominal_foot_z
+        self._natural_clearance_scale = 0.10 * leg_length
+        self._natural_contact_depth = 0.04 * leg_length
         if self._auto_step_frequency:
             self._step_frequency = float(
-                np.sqrt(9.81 / max(base_h, 1e-3)) / (2.0 * np.pi)
+                np.sqrt(9.81 / max(leg_length, 1e-3)) / (2.0 * np.pi)
             )
             self._config['step_frequency'] = self._step_frequency
             self._cycle_samples = 1.0 / (self._step_frequency * self.dt)
@@ -1887,28 +1890,33 @@ class Joystick(mjx_env.MjxEnv):
             and body_velocity_world is not None
         ):
             foot_phases = phase + jp.array([0.0, jp.pi])
-            swing = jp.square(jp.maximum(jp.sin(foot_phases), 0.0))
+            phase_sin = jp.sin(foot_phases)
+            swing = jp.square(jp.maximum(phase_sin, 0.0))
+            stance = jp.square(jp.minimum(phase_sin, 0.0))
             foot_rel_forward_velocity = (
                 foot_velocities_world[:, :2] - body_velocity_world[:2]
             ) @ body_forward_xy
-            vel_scale = jp.maximum(2.0 * self._target_velocity, 1e-3)
-            vel_credit = jp.sum(
-                swing * jp.tanh(foot_rel_forward_velocity / vel_scale)
+            v_target = jp.maximum(self._target_velocity, 1e-3)
+            # Score each foot individually via tanh so one dominant leg cannot
+            # compensate for an inactive opposite leg.
+            vel_credit = 0.5 * jp.sum(
+                swing * jp.tanh(foot_rel_forward_velocity / (2.0 * v_target))
+                + stance * jp.tanh(-foot_rel_forward_velocity / v_target)
             )
-            # Foot-to-foot separation is invariant to torso pitch and COM shift.
-            # sin^2(phase) weights mid-swing velocity; cos^2(phase) weights
-            # liftoff/touchdown lead-trail crossing.
-            d_kin = jp.maximum(
-                getattr(self, '_kinematic_step_distance', 0.016), 1e-3
+            # Each foot must independently trail the COM at liftoff (-cos < 0)
+            # and lead the COM at touchdown (-cos > 0).
+            d_half = jp.maximum(
+                0.5 * getattr(self, '_kinematic_step_distance', 0.0176), 1e-3
             )
-            foot_separation = (
-                foot_forward_positions[0] - foot_forward_positions[1]
+            foot_rel_forward = (
+                foot_forward_positions - self._nominal_foot_forward_positions
             )
-            crossing_credit = jp.square(jp.cos(phase)) * jp.tanh(
-                -jp.cos(phase) * foot_separation / d_kin
+            placement_credit = 0.5 * jp.sum(
+                jp.square(jp.cos(foot_phases))
+                * jp.tanh(-jp.cos(foot_phases) * foot_rel_forward / d_half)
             )
             reward = self._swing_foot_forward_reward_weight * (
-                vel_credit + crossing_credit
+                vel_credit + placement_credit
             )
             return (
                 reward,
