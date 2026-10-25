@@ -384,17 +384,25 @@ class Joystick(mjx_env.MjxEnv):
         )
         mujoco.mj_forward(self._mj_model, default_data)
         self._sole_corners = jp.array(self._get_sole_corners(default_data))
+        actuator_joint_ids = self._mj_model.actuator_trnid[:, 0]
         # Characteristic physical scales derived from the robot's XML leg length
-        # (hip/torso origin above the standing soles) and pendulum dynamics.
+        # (hip joints / CoM above the standing soles, invariant to CAD body
+        # origin) and pendulum dynamics.
         nominal_foot_z = float(
             np.mean(default_data.site_xpos[np.asarray(self._feet_site_ids), 2])
         )
-        leg_length = float(default_data.xpos[self._body_idx, 2]) - nominal_foot_z
+        hip_z = float(np.max(default_data.xanchor[actuator_joint_ids, 2]))
+        com_z = float(default_data.subtree_com[self._body_idx, 2])
+        leg_length = max(
+            hip_z - nominal_foot_z,
+            1.5 * (com_z - nominal_foot_z),
+            0.05,
+        )
         self._natural_clearance_scale = 0.10 * leg_length
         self._natural_contact_depth = 0.04 * leg_length
         if self._auto_step_frequency:
             self._step_frequency = float(
-                np.sqrt(9.81 / max(leg_length, 1e-3)) / (2.0 * np.pi)
+                np.sqrt(9.81 / leg_length) / (2.0 * np.pi)
             )
             self._config['step_frequency'] = self._step_frequency
             self._cycle_samples = 1.0 / (self._step_frequency * self.dt)
@@ -414,7 +422,6 @@ class Joystick(mjx_env.MjxEnv):
         )
         self._ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
         self._ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
-        actuator_joint_ids = self._mj_model.actuator_trnid[:, 0]
         self._actuated_dof_ids = jp.array(
             self._mj_model.jnt_dofadr[actuator_joint_ids]
         )
