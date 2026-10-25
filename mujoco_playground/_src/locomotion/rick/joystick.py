@@ -126,7 +126,7 @@ def default_config() -> config_dict.ConfigDict:
         # Penalize changes inside the episode's sampled MG90S deadband so the
         # policy learns to hold or make a change the real servo can execute.
         'servo_deadband_cost_weight': 0.01,
-        'healthy_reward': 0.20,
+        'healthy_reward': 1.0,
         'vertical_velocity_cost_weight': 0.02,
 
         # Gait shaping weights. Clearance, unloading, step length, and cadence
@@ -1067,11 +1067,14 @@ class Joystick(mjx_env.MjxEnv):
         healthy_orientation = uprightness >= self._minimum_upright
         is_healthy = healthy_height & healthy_orientation
         is_healthy_float = is_healthy.astype(jp.float32)
-        healthy_reward = self._healthy_reward * is_healthy_float
         done = (
             1.0 - is_healthy_float
             if self._terminate_when_unhealthy
             else jp.array(0.0)
+        )
+        healthy_reward = (
+            self._healthy_reward * is_healthy_float
+            - self._cycle_samples * self._healthy_reward * done
         )
 
         reward = (
