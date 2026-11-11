@@ -24,5 +24,5 @@ def ensure_rick_assets():
 
 def task_to_xml(task_name: str) -> epath.Path:
     ensure_rick_assets()
-    xml_path = ROOT_PATH / "xmls" / "rick_v2" / "RoboVert_Copy_v16.xml"
+    xml_path = ROOT_PATH / "xmls" / "rick_v2" / "RoboVert_Copy_v24.xml"
     return xml_path
