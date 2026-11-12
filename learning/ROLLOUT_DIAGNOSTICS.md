@@ -26,6 +26,51 @@ current PPO defaults: supply matching network settings when necessary.
 The source code and assets must also match the checkpoint when reproducing an
 old run; loading a checkpoint does not check out historical environment code.
 
+## Rick yaw recovery
+
+New Rick configs apply brief world-Z torques to the torso in 50% of episodes.
+The first pulse starts after 2–4 seconds; pulses last 0.16 seconds and have
+3–6 seconds of rest between them. Each pulse samples a signed torque from
+`yaw_disturbance_torque_range=(-0.002, 0.002)` N m. Strength ramps from 25% to
+100% over the first 10 seconds **of each episode**, sampled at pulse onset.
+This is an episode-local ramp, not a curriculum tied to training iterations.
+The fixed START heading reference, policy observation layout, and rewards are
+unchanged. The simulated gyro and attitude filter observe the physical turn.
+
+These are conservative starting torques, not guaranteed angular deviations:
+contact, gait phase, and the policy affect the resulting turn. Use measured
+peak heading error to tune toward roughly 5–10 degrees before increasing
+difficulty. Saved configs without these settings default to no disturbance.
+Fine-tuning with the normal training command uses current defaults; supply
+`--load_checkpoint_path=/path/to/checkpoints` to initialize from a walking
+policy. To disable disturbances, override `yaw_disturbance_probability` to 0.
+
+Compare a checkpoint on identical seeds under no pulse, positive yaw, and
+negative yaw. For one full-strength positive pulse at 2 seconds:
+
+```sh
+train-jax-ppo --env_name=RickJoystickFlatTerrain --play_only \
+  --load_checkpoint_path=/path/to/checkpoints --diagnostics --num_videos=0 \
+  --diagnostic_seeds=0,1,2,3 --action_repeat=1 \
+  --playground_config_overrides='{"yaw_disturbance_probability":1.0,"yaw_disturbance_torque_range":[0.002,0.002],"yaw_disturbance_start_range":[2.0,2.0],"yaw_disturbance_interval_range":[100.0,100.0],"yaw_disturbance_ramp_seconds":0.0}'
+```
+
+Repeat with `[-0.002,-0.002]` for negative yaw, and with probability `0.0`
+for the baseline. The disturbance RNG is separate from the existing actuator,
+reset, and sensor RNGs, so these comparisons preserve the other random draws.
+
+Rick's `summary.json` now includes `yaw_recovery` per pulse: torque, peak true
+heading error, forward distance, and final mean heading error and speed.
+`recovered_while_walking` requires survival through a complete 2-second window
+after release, mean absolute heading error <=5 degrees and mean forward speed
+>=50% of the command in the final 0.5 seconds, and >=50% commanded forward
+distance over the full window. Falls and incomplete/interrupted windows fail.
+Small pulses may never exceed 5 degrees: inspect peak error before interpreting
+a pass as evidence of recovery. Compare forward progress against the undisturbed
+baseline as well. Use `action_repeat=1` to record every pulse and control step.
+The trace retains true and estimated heading separately, plus applied torque,
+so a drifting estimate can be distinguished from a failed physical correction.
+
 `--rscope_envs=4` additionally records a bundle at each nonzero policy checkpoint
 callback. `--diagnostics` records a final bundle. The per-callback recorder
 replaces the disabled upstream integration and supports Rick's internal

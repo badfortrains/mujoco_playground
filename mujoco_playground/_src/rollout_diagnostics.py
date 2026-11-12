@@ -124,6 +124,11 @@ def summarize(trace, seeds):
         'mean_metrics': {k: float(v.mean()) for k, v in metrics.items()
                          if v.ndim == 1 and v.size},
     }
+    if 'yaw_disturbance_torque' in metrics:
+      item['yaw_recovery'] = summarize_yaw_recovery(
+          trace['data']['time'][i][valid], metrics,
+          trace['done'][i][valid],
+      )
     for side in ('left', 'right'):
       height = metrics.get(f'{side}_foot_height')
       target = metrics.get(f'desired_{side}_foot_height')
@@ -152,6 +157,66 @@ def summarize(trace, seeds):
           )
     summaries.append(item)
   return summaries
+
+
+def summarize_yaw_recovery(time, metrics, done):
+  """Score each pulse over 2 s after release, excluding incomplete windows.
+
+  Recovery requires <=5 degrees error and >=50% commanded forward speed in
+  the final 0.5 s, plus >=50% commanded forward distance over the whole window.
+  True heading is used for scoring; estimated heading remains policy-only.
+  Metrics must be recorded every control step (action_repeat=1).
+  """
+  time = np.asarray(time)
+  if time.size < 2:
+    return []
+  dt = float(np.median(np.diff(time)))
+  torque = metrics['yaw_disturbance_torque']
+  active = torque != 0
+  starts = np.flatnonzero(active & ~np.r_[False, active[:-1]])
+  heading = np.abs(metrics['heading_error'])
+  velocity = metrics['forward_velocity']
+  target = metrics['target_velocity']
+  results = []
+  for start in starts:
+    end = start
+    while end + 1 < len(time) and active[end + 1]:
+      end += 1
+    # Stop at the next pulse or end of valid data, never frozen padding.
+    stop = end + 1
+    while (stop < len(time) and not active[stop]
+           and time[stop] <= time[end] + 2.0 + dt * 0.1):
+      stop += 1
+    window = slice(end + 1, stop)
+    complete = (stop > end + 1 and time[stop - 1] - time[end] >= 2.0 - dt * 0.1)
+    tail = np.arange(end + 1, stop)
+    tail = tail[time[tail] > time[end] + 1.5]
+    distance = float(np.sum(velocity[window]) * dt)
+    expected_distance = float(np.sum(target[window]) * dt)
+    tail_error = float(np.mean(heading[tail])) if tail.size else None
+    tail_speed = float(np.mean(velocity[tail])) if tail.size else None
+    survived = not bool(np.any(done[start:stop]))
+    results.append({
+        'pulse_start_s': float(time[start] - dt),
+        'pulse_end_s': float(time[end]),
+        'torque_nm': float(torque[start]),
+        'peak_heading_error_deg': float(np.rad2deg(heading[start:stop].max())),
+        'recovery_window_complete': bool(complete),
+        'survived': survived,
+        'forward_distance_m': distance,
+        'target_forward_distance_m': expected_distance,
+        'final_mean_abs_heading_error_deg': (
+            float(np.rad2deg(tail_error)) if tail_error is not None else None
+        ),
+        'final_mean_forward_velocity_m_s': tail_speed,
+        'recovered_while_walking': bool(
+            complete and survived and tail.size and expected_distance > 0
+            and tail_error <= np.deg2rad(5.0)
+            and tail_speed >= 0.5 * float(np.mean(target[tail]))
+            and distance >= 0.5 * expected_distance
+        ),
+    })
+  return results
 
 
 def plot_trace(trace, directory, seeds):

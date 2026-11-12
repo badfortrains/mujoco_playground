@@ -27,6 +27,18 @@ from mujoco_playground._src.locomotion.rick import rick_constants as consts
 
 _SERVO_US_PER_RADIAN = 2000.0 / 3.141592653589793
 
+# Signed world-Z torque, sampled once per pulse. Old saved configs opt out.
+_YAW_DISTURBANCE_DEFAULTS = {
+    'yaw_disturbance_probability': 0.5,
+    'yaw_disturbance_torque_range': (-0.002, 0.002),  # N m.
+    'yaw_disturbance_duration': 0.16,  # s.
+    'yaw_disturbance_start_range': (2.0, 4.0),  # s before first pulse.
+    'yaw_disturbance_interval_range': (3.0, 6.0),  # s between pulses.
+    # Within each episode, ramp from 25% to full strength over this time.
+    # Set zero for full-strength evaluation; this is not a PPO-step curriculum.
+    'yaw_disturbance_ramp_seconds': 10.0,
+}
+
 
 def default_config() -> config_dict.ConfigDict:
     return config_dict.ConfigDict({
@@ -95,6 +107,9 @@ def default_config() -> config_dict.ConfigDict:
         'root_angular_velocity_noise_scale': 0.10,  # rad/s.
         'joint_velocity_noise_scale': 0.10,  # rad/s.
 
+        # Recovery practice after START, with half the episodes undisturbed.
+        **_YAW_DISTURBANCE_DEFAULTS,
+
         # Deployment-like IMU model.  The simulated accelerometer includes
         # body acceleration and drives the same 6-DoF Madgwick update used by
         # the Pico.  Accelerometer values are in g and gyro values in rad/s.
@@ -159,7 +174,16 @@ class Joystick(mjx_env.MjxEnv):
         config: config_dict.ConfigDict = default_config(),
         config_overrides: dict = None,
     ):
+        # Permit explicit overrides when evaluating a pre-disturbance config,
+        # but preserve its undisturbed behavior unless explicitly enabled.
+        with config.unlocked():
+            for name, value in _YAW_DISTURBANCE_DEFAULTS.items():
+                if name not in config:
+                    config[name] = (
+                        0.0 if name == 'yaw_disturbance_probability' else value
+                    )
         super().__init__(config, config_overrides)
+        self._configure_yaw_disturbance(config)
 
         path = consts.task_to_xml(task)
         self._xml_path = path.as_posix()
@@ -673,6 +697,9 @@ class Joystick(mjx_env.MjxEnv):
 
         zero = jp.array(0.0)
         metrics = {
+            'yaw_disturbance_torque': zero,
+            'heading_error': zero,
+            'target_velocity': jp.array(self._target_velocity),
             'reward_velocity_tracking': zero,
             'reward_foot_phase': zero,
             'reward_swing_lift': zero,
@@ -753,6 +780,9 @@ class Joystick(mjx_env.MjxEnv):
                 'phase': phase,
                 'imu_quat': imu_quat,
                 'heading_reference': heading_reference,
+                'yaw_disturbance': self._reset_yaw_disturbance(
+                    jax.random.fold_in(rng, 241)
+                ),
                 'drift_history': jp.zeros((self._cycle_window, 2)),
                 'drift_history_count': jp.array(0, dtype=jp.int32),
                 'previous_imu_velocity_world': jp.zeros((3,)),
@@ -889,7 +919,14 @@ class Joystick(mjx_env.MjxEnv):
         new_command_history = jp.roll(command_history, shift=-1, axis=0)
         new_command_history = new_command_history.at[-1].set(command)
 
-        data0 = state.data
+        disturbance, yaw_torque = self._step_yaw_disturbance(
+            state.info['yaw_disturbance']
+        )
+        # xfrc_applied is [world force, world torque]. Clear the previous
+        # pulse every step; never rotate qpos or reset the IMU/reference.
+        data0 = state.data.replace(xfrc_applied=jp.zeros_like(
+            state.data.xfrc_applied
+        ).at[self._body_idx, 5].set(yaw_torque))
         stiffness = state.info['servo_stiffness']
         actuator_gainprm = self._mjx_model.actuator_gainprm.at[:, 0].set(
             self._mjx_model.actuator_gainprm[:, 0] * stiffness
@@ -1150,6 +1187,8 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         state.metrics.update(
+            yaw_disturbance_torque=yaw_torque,
+            heading_error=jp.arctan2(body_forward_xy[0], -body_forward_xy[1]),
             reward_velocity_tracking=velocity_tracking_reward,
             reward_foot_phase=foot_phase_reward,
             reward_swing_lift=swing_lift_reward,
@@ -1226,8 +1265,72 @@ class Joystick(mjx_env.MjxEnv):
                 'drift_history_count': drift_count,
                 'previous_imu_velocity_world': imu_velocity_world,
                 'rng': step_key,
+                'yaw_disturbance': disturbance,
             },
         )
+
+    def _configure_yaw_disturbance(self, config):
+        self._yaw_probability = float(config.yaw_disturbance_probability)
+        if not np.isfinite(self._yaw_probability) or not 0 <= self._yaw_probability <= 1:
+            raise ValueError('yaw_disturbance_probability must be in [0, 1]')
+        self._yaw_torque_range = tuple(config.yaw_disturbance_torque_range)
+        self._yaw_start_range = tuple(config.yaw_disturbance_start_range)
+        self._yaw_interval_range = tuple(config.yaw_disturbance_interval_range)
+        for name, bounds in (
+            ('torque', self._yaw_torque_range),
+            ('start', self._yaw_start_range),
+            ('interval', self._yaw_interval_range),
+        ):
+            if (len(bounds) != 2 or not np.all(np.isfinite(bounds))
+                    or bounds[0] > bounds[1]):
+                raise ValueError(f'yaw_disturbance_{name}_range must be finite and ordered')
+            if name != 'torque' and bounds[0] < self.dt:
+                raise ValueError(f'yaw_disturbance_{name}_range must be >= ctrl_dt')
+        duration = float(config.yaw_disturbance_duration)
+        self._yaw_ramp_seconds = float(config.yaw_disturbance_ramp_seconds)
+        if not np.isfinite(duration) or duration < self.dt:
+            raise ValueError('yaw_disturbance_duration must be finite and >= ctrl_dt')
+        if not np.isfinite(self._yaw_ramp_seconds) or self._yaw_ramp_seconds < 0:
+            raise ValueError('yaw_disturbance_ramp_seconds must be finite and >= 0')
+        self._yaw_duration_steps = int(np.ceil(duration / self.dt))
+
+    def _yaw_wait_steps(self, key, bounds):
+        return jp.ceil(self._sample_uniform(key, bounds, ()) / self.dt).astype(jp.int32)
+
+    def _reset_yaw_disturbance(self, key):
+        enable_key, wait_key, key = jax.random.split(key, 3)
+        return {
+            'enabled': jax.random.bernoulli(enable_key, self._yaw_probability),
+            'wait': self._yaw_wait_steps(wait_key, self._yaw_start_range),
+            'remaining': jp.array(0, dtype=jp.int32),
+            'elapsed': jp.array(0, dtype=jp.int32),
+            'torque': jp.array(0.0),
+            'rng': key,
+        }
+
+    def _step_yaw_disturbance(self, disturbance):
+        torque_key, wait_key, key = jax.random.split(disturbance['rng'], 3)
+        start = (disturbance['enabled'] & (disturbance['wait'] == 0)
+                 & (disturbance['remaining'] == 0))
+        scale = (0.25 + 0.75 * jp.minimum(
+            disturbance['elapsed'] * self.dt / self._yaw_ramp_seconds, 1.0
+        )) if self._yaw_ramp_seconds > 0 else 1.0
+        torque = jp.where(start, scale * self._sample_uniform(
+            torque_key, self._yaw_torque_range, ()
+        ), disturbance['torque'])
+        remaining = jp.where(start, self._yaw_duration_steps, disturbance['remaining'])
+        active = disturbance['enabled'] & (remaining > 0)
+        wait = jp.where(start, self._yaw_wait_steps(
+            wait_key, self._yaw_interval_range
+        ), disturbance['wait'])
+        return {
+            **disturbance,
+            'wait': jp.where(active, wait, jp.maximum(wait - 1, 0)),
+            'remaining': jp.maximum(remaining - 1, 0),
+            'elapsed': disturbance['elapsed'] + 1,
+            'torque': torque,
+            'rng': key,
+        }, jp.where(active, torque, 0.0)
 
     def _get_sole_corners(self, data: mujoco.MjData) -> np.ndarray:
         """Bounds Rick's rectangular soles in their foot-center site frames.

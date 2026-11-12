@@ -65,6 +65,54 @@ def policy(obs, key):
 
 
 class DiagnosticsTest(unittest.TestCase):
+  def test_yaw_recovery_requires_heading_and_forward_motion(self):
+    time = np.arange(1, 151) * .02
+    torque = np.zeros(150)
+    torque[10:18] = .002
+    metrics = {
+        'yaw_disturbance_torque': torque,
+        'heading_error': np.zeros(150),
+        'forward_velocity': np.full(150, .05),
+        'target_velocity': np.full(150, .05),
+    }
+    metrics['heading_error'][10:30] = np.deg2rad(10)
+    done = np.zeros(150)
+    score = diagnostics.summarize_yaw_recovery(time, metrics, done)[0]
+    self.assertTrue(score['recovered_while_walking'])
+    self.assertAlmostEqual(score['forward_distance_m'], .1)
+    self.assertAlmostEqual(score['peak_heading_error_deg'], 10)
+    metrics['forward_velocity'][:] = 0
+    self.assertFalse(diagnostics.summarize_yaw_recovery(
+        time, metrics, done)[0]['recovered_while_walking'])
+    metrics['forward_velocity'][:] = .05
+    metrics['heading_error'][:] = np.deg2rad(10)
+    self.assertFalse(diagnostics.summarize_yaw_recovery(
+        time, metrics, done)[0]['recovered_while_walking'])
+
+  def test_yaw_recovery_rejects_falls_truncation_and_interrupted_windows(self):
+    time = np.arange(1, 151) * .02
+    torque = np.zeros(150)
+    torque[10:18] = -.002
+    metrics = {
+        'yaw_disturbance_torque': torque,
+        'heading_error': np.zeros(150),
+        'forward_velocity': np.full(150, .05),
+        'target_velocity': np.full(150, .05),
+    }
+    done = np.zeros(150)
+    done[100] = 1
+    self.assertFalse(diagnostics.summarize_yaw_recovery(
+        time, metrics, done)[0]['recovered_while_walking'])
+    done[:] = 0
+    score = diagnostics.summarize_yaw_recovery(
+        time[:40], {k: v[:40] for k, v in metrics.items()}, done[:40])[0]
+    self.assertFalse(score['recovery_window_complete'])
+    self.assertFalse(score['recovered_while_walking'])
+    torque[50:58] = .002
+    scores = diagnostics.summarize_yaw_recovery(time, metrics, done)
+    self.assertEqual(len(scores), 2)
+    self.assertFalse(scores[0]['recovery_window_complete'])
+
   def test_summary_distinguishes_center_lift_from_sole_clearance(self):
     # Three valid swing frames: rocking, real lift, and contact despite height.
     # The fourth frame is padding and must not inflate maximum clearance.
