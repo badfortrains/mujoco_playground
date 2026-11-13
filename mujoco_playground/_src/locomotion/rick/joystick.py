@@ -5,7 +5,8 @@ The policy observation contains only values available at deployment:
 * recent normalized servo commands (known by the controller),
 * a body-frame gravity estimate and angular velocity from the LSM6DSO,
 * the controller's gait clock, and
-* the commanded forward speed and estimated heading relative to START.
+* the commanded body-forward speed and world-Z turn rate, and
+* estimated heading error relative to the integrated turn command.
 
 Joint state, root velocity, true heading, foot state, and contact state are used only
 for rewards, termination, and diagnostics during training.
@@ -54,7 +55,14 @@ def default_config() -> config_dict.ConfigDict:
         'njmax': 96,
 
         # Policy command and gait parameters.
-        'target_velocity': 0.050,
+        'target_velocity': 0.050,  # Default deployment speed, m/s.
+        'motion_command_version': 1,
+        'forward_velocity_range': (-0.04, 0.08),  # Negative = reverse.
+        'yaw_rate_range': (-0.6, 0.6),  # rad/s; positive = left.
+        'command_resampling_time_range': (3.0, 6.0),
+        'linear_acceleration_limit': 0.05,  # m/s^2.
+        'yaw_acceleration_limit': 1.0,  # rad/s^2.
+        'standing_reward_weight': 4.0,
         'action_scale': 0.50,
         'step_frequency': 1.5,
         'auto_step_frequency': True,
@@ -127,7 +135,8 @@ def default_config() -> config_dict.ConfigDict:
 
         # Task rewards.
         'velocity_tracking_weight': 2.0,
-        'tracking_sigma': 0.0025,
+        'tracking_sigma': 0.0004,  # 0.02 m/s error gives exp(-1).
+        'sideways_tracking_sigma': 0.0025,  # Preserve the working sway tolerance.
         'sideways_velocity_cost_weight': 0.02,
         'yaw_rate_cost_weight': 0.4,
         # Average a full gait period BEFORE squaring: alternating sway cancels.
@@ -145,8 +154,8 @@ def default_config() -> config_dict.ConfigDict:
         'vertical_velocity_cost_weight': 0.02,
 
         # Gait shaping weights. Clearance, unloading, step length, and cadence
-        # scales are derived automatically from the XML leg length and
-        # target_velocity.
+        # scales are derived from XML leg length and the current command.
+        # Cadence stays fixed at the robot's nominal rhythm.
         'foot_phase_reward_weight': 5.0,
         'stance_foot_height_cost_weight': 0.5,
         'swing_sole_tilt_cost_weight': 0.5,
@@ -166,7 +175,7 @@ def default_config() -> config_dict.ConfigDict:
 
 
 class Joystick(mjx_env.MjxEnv):
-    """Tracks a forward command using deployment-compatible observations."""
+    """Tracks body-forward speed and turn rate with deployment observations."""
 
     def __init__(
         self,
@@ -212,6 +221,7 @@ class Joystick(mjx_env.MjxEnv):
             raise ValueError("command_history_length must be at least 2")
 
         self._target_velocity = config.target_velocity
+        self._configure_motion_commands(config)
         self._action_scale = config.action_scale
         self._step_frequency = config.step_frequency
         self._servo_response_range = config.servo_response_range
@@ -269,6 +279,9 @@ class Joystick(mjx_env.MjxEnv):
 
         self._velocity_tracking_weight = config.velocity_tracking_weight
         self._tracking_sigma = config.tracking_sigma
+        self._sideways_tracking_sigma = config.get(
+            'sideways_tracking_sigma', config.tracking_sigma
+        )
         self._sideways_velocity_cost_weight = (
             config.sideways_velocity_cost_weight
         )
@@ -434,9 +447,6 @@ class Joystick(mjx_env.MjxEnv):
             self._cycle_weights = jp.ones(self._cycle_window).at[0].set(
                 self._cycle_samples - (self._cycle_window - 1)
             ) / self._cycle_samples
-        self._kinematic_step_distance = float(
-            self._target_velocity / max(2.0 * self._step_frequency, 1e-3)
-        )
         default_foot_offsets = (
             jp.array(default_data.site_xpos)[self._feet_site_ids]
             - jp.array(default_data.subtree_com[self._body_idx])
@@ -679,6 +689,11 @@ class Joystick(mjx_env.MjxEnv):
         )
         gravity_estimate = self._gravity_from_quat(imu_quat)
         heading_reference = self._heading_from_quat(imu_quat)
+        command_key = jax.random.fold_in(rng, 242)
+        target_command, command_ticks = self._sample_motion_command(command_key)
+        # START always ramps from rest, as on the robot.
+        motion_command = jp.zeros(2)
+        true_heading_reference = self._heading_from_quat(data.qpos[3:7])
         _, gyro_local = self._get_imu_signals(data)
         gyro_measurement = (
             gyro_local
@@ -693,13 +708,16 @@ class Joystick(mjx_env.MjxEnv):
             gyro_measurement=gyro_measurement,
             phase=phase,
             heading_error=jp.array(0.0),
+            motion_command=motion_command,
         )
 
         zero = jp.array(0.0)
         metrics = {
             'yaw_disturbance_torque': zero,
             'heading_error': zero,
-            'target_velocity': jp.array(self._target_velocity),
+            'target_velocity': motion_command[0],
+            'target_yaw_rate': motion_command[1],
+            'cost_standing': zero,
             'reward_velocity_tracking': zero,
             'reward_foot_phase': zero,
             'reward_swing_lift': zero,
@@ -780,6 +798,10 @@ class Joystick(mjx_env.MjxEnv):
                 'phase': phase,
                 'imu_quat': imu_quat,
                 'heading_reference': heading_reference,
+                'true_heading_reference': true_heading_reference,
+                'motion_command': motion_command,
+                'target_command': target_command,
+                'command_ticks': command_ticks,
                 'yaw_disturbance': self._reset_yaw_disturbance(
                     jax.random.fold_in(rng, 241)
                 ),
@@ -805,6 +827,17 @@ class Joystick(mjx_env.MjxEnv):
             step_key,
         ) = jax.random.split(
             state.info['rng'], 4
+        )
+
+        motion_command, target_command, command_ticks = self._step_motion_command(
+            state.info['motion_command'], state.info['target_command'],
+            state.info['command_ticks'], jax.random.fold_in(step_key, 242),
+        )
+        heading_reference = self._wrap_phase(
+            state.info['heading_reference'] + motion_command[1] * self.dt
+        )
+        true_heading_reference = self._wrap_phase(
+            state.info['true_heading_reference'] + motion_command[1] * self.dt
         )
 
         # The controller knows this clipped command, so this is what enters
@@ -989,23 +1022,31 @@ class Joystick(mjx_env.MjxEnv):
             1e-6,
         )
 
+        root_angular_velocity_local = data.qvel[3:6]
+        root_angular_velocity_world = math.rotate(
+            root_angular_velocity_local,
+            root_quat,
+        )
+        yaw_rate = root_angular_velocity_world[2]
+
         com_before = data0.subtree_com[self._body_idx]
         com_after = data.subtree_com[self._body_idx]
         velocity_world = (com_after - com_before) / self.dt
-        forward_velocity = -velocity_world[1]
-        sideways_velocity = velocity_world[0]
+        forward_velocity, sideways_velocity = self._body_planar_velocity(
+            velocity_world, body_forward_xy
+        )
 
         velocity_tracking_reward = (
             self._velocity_tracking_weight
             * jp.exp(
-                -jp.square(forward_velocity - self._target_velocity)
+                -jp.square(forward_velocity - motion_command[0])
                 / self._tracking_sigma
             )
         )
         sideways_velocity_cost = (
             self._sideways_velocity_cost_weight
             * jp.square(sideways_velocity)
-            / self._tracking_sigma
+            / self._sideways_tracking_sigma
         )
 
         desired_foot_heights = self._desired_foot_heights(phase)
@@ -1026,6 +1067,8 @@ class Joystick(mjx_env.MjxEnv):
                 phase,
                 foot_velocities_world,
                 velocity_world,
+                motion_command,
+                yaw_rate,
             )
         )
 
@@ -1040,6 +1083,16 @@ class Joystick(mjx_env.MjxEnv):
         foot_contacts_before = (
             data0.sensordata[self._foot_contact_sensor_adrs] > 0
         )
+        activity = self._walking_activity(motion_command)
+        # Blend stepping into quiet, supported standing at zero command.
+        foot_phase_reward *= activity
+        swing_lift_reward *= activity
+        swing_airborne_reward *= activity
+        swing_foot_forward_reward *= activity
+        standing_cost = (1.0 - activity) * self._standing_reward_weight * (
+            jp.sum(~foot_contacts)
+            + jp.sum(jp.square(foot_heights / self._natural_clearance_scale))
+        )
         foot_slip_cost = self._get_foot_slip_cost(
             foot_velocities_world,
             foot_contacts_before,
@@ -1050,22 +1103,17 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         # These global quantities shape training but never enter observation.
-        root_angular_velocity_local = data.qvel[3:6]
-        root_angular_velocity_world = math.rotate(
-            root_angular_velocity_local,
-            root_quat,
-        )
-        yaw_rate = root_angular_velocity_world[2]
-        yaw_rate_cost = self._yaw_rate_cost_weight * jp.square(yaw_rate)
+        yaw_rate_error = yaw_rate - motion_command[1]
+        yaw_rate_cost = self._yaw_rate_cost_weight * jp.square(yaw_rate_error)
         drift_history, drift_count, cycle_velocity, cycle_ready = (
             self._update_cycle_velocity(
                 state.info['drift_history'], state.info['drift_history_count'],
-                jp.array([sideways_velocity, yaw_rate]),
+                jp.array([sideways_velocity, yaw_rate_error]),
             )
         )
         cycle_sideways_velocity_cost = (
             self._cycle_sideways_velocity_cost_weight
-            * jp.square(cycle_velocity[0]) / self._tracking_sigma
+            * jp.square(cycle_velocity[0]) / self._sideways_tracking_sigma
             * cycle_ready
         )
         cycle_yaw_rate_cost = (
@@ -1079,7 +1127,7 @@ class Joystick(mjx_env.MjxEnv):
 
         heading_alignment = jp.dot(
             body_forward_xy,
-            self._forward_world_xy,
+            jp.array([jp.sin(true_heading_reference), -jp.cos(true_heading_reference)]),
         )
         heading_cost = (
             self._heading_cost_weight * (1.0 - heading_alignment)
@@ -1126,6 +1174,7 @@ class Joystick(mjx_env.MjxEnv):
             - cycle_sideways_velocity_cost
             - cycle_yaw_rate_cost
             - heading_cost
+            - standing_cost
             - tilt_cost
             - roll_pitch_rate_cost
             - action_rate_cost
@@ -1173,7 +1222,7 @@ class Joystick(mjx_env.MjxEnv):
         )
         gravity_estimate = self._gravity_from_quat(imu_quat)
         heading_error = self._wrap_phase(
-            self._heading_from_quat(imu_quat) - state.info['heading_reference']
+            self._heading_from_quat(imu_quat) - heading_reference
         )
 
         # Heading uses the same noisy filter as the Pico, not privileged root
@@ -1184,11 +1233,17 @@ class Joystick(mjx_env.MjxEnv):
             gyro_measurement=gyro_measurement,
             phase=phase,
             heading_error=heading_error,
+            motion_command=motion_command,
         )
 
         state.metrics.update(
             yaw_disturbance_torque=yaw_torque,
-            heading_error=jp.arctan2(body_forward_xy[0], -body_forward_xy[1]),
+            heading_error=self._wrap_phase(
+                jp.arctan2(body_forward_xy[0], -body_forward_xy[1]) - true_heading_reference
+            ),
+            target_velocity=motion_command[0],
+            target_yaw_rate=motion_command[1],
+            cost_standing=-standing_cost,
             reward_velocity_tracking=velocity_tracking_reward,
             reward_foot_phase=foot_phase_reward,
             reward_swing_lift=swing_lift_reward,
@@ -1261,6 +1316,11 @@ class Joystick(mjx_env.MjxEnv):
                 'servo_output_target': servo_output_target,
                 'phase': phase,
                 'imu_quat': imu_quat,
+                'heading_reference': heading_reference,
+                'true_heading_reference': true_heading_reference,
+                'motion_command': motion_command,
+                'target_command': target_command,
+                'command_ticks': command_ticks,
                 'drift_history': drift_history,
                 'drift_history_count': drift_count,
                 'previous_imu_velocity_world': imu_velocity_world,
@@ -1479,6 +1539,68 @@ class Joystick(mjx_env.MjxEnv):
             center_of_mass_offset
         )
 
+    def _configure_motion_commands(self, config):
+        if not config.heading_observation:
+            raise ValueError('motion commands require heading_observation=True')
+        if config.get('motion_command_version') != 1:
+            raise ValueError('Rick command training requires motion_command_version=1; start a new run')
+        for name in ('forward_velocity_range', 'yaw_rate_range',
+                     'command_resampling_time_range'):
+            bounds = np.asarray(config[name], dtype=float)
+            if bounds.shape != (2,) or not np.all(np.isfinite(bounds)) or bounds[0] > bounds[1]:
+                raise ValueError(f'{name} must be a finite ordered pair')
+        if config.command_resampling_time_range[0] < self.dt:
+            raise ValueError('command_resampling_time_range must be at least ctrl_dt')
+        for name in ('linear_acceleration_limit', 'yaw_acceleration_limit'):
+            if not np.isfinite(config[name]) or config[name] <= 0:
+                raise ValueError(f'{name} must be positive and finite')
+        self._command_min = jp.array([config.forward_velocity_range[0], config.yaw_rate_range[0]])
+        self._command_max = jp.array([config.forward_velocity_range[1], config.yaw_rate_range[1]])
+        if bool(jp.any(self._command_min > 0) | jp.any(self._command_max < 0)):
+            raise ValueError('motion command ranges must include zero for standing')
+        self._command_time_range = tuple(config.command_resampling_time_range)
+        self._command_acceleration = jp.array([
+            config.linear_acceleration_limit, config.yaw_acceleration_limit,
+        ])
+        if not np.isfinite(config.standing_reward_weight) or config.standing_reward_weight < 0:
+            raise ValueError('standing_reward_weight must be nonnegative and finite')
+        if not config.forward_velocity_range[0] <= config.target_velocity <= config.forward_velocity_range[1]:
+            raise ValueError('target_velocity must be within forward_velocity_range')
+        self._standing_reward_weight = config.standing_reward_weight
+
+    def _sample_motion_command(self, rng):
+        value_key, mode_key, time_key = jax.random.split(rng, 3)
+        command = jax.random.uniform(
+            value_key, (2,), minval=self._command_min, maxval=self._command_max
+        )
+        mode = jax.random.uniform(mode_key)
+        # 15% standing, 15% pivoting, 30% straight, 40% combined motion.
+        command = jp.where(mode < 0.30, command.at[0].set(0.0), command)
+        command = jp.where((mode >= 0.30) & (mode < 0.60), command.at[1].set(0.0), command)
+        command = jp.where(mode < 0.15, jp.zeros(2), command)
+        duration = jax.random.uniform(time_key, (),
+            minval=self._command_time_range[0], maxval=self._command_time_range[1])
+        ticks = jp.maximum(jp.ceil(duration / self.dt).astype(jp.int32), 1)
+        return command, ticks
+
+    def _step_motion_command(self, command, target, ticks, rng):
+        sampled_target, sampled_ticks = self._sample_motion_command(rng)
+        target = jp.where(ticks <= 0, sampled_target, target)
+        ticks = jp.where(ticks <= 0, sampled_ticks, ticks)
+        limit = self._command_acceleration * self.dt
+        command = command + jp.clip(target - command, -limit, limit)
+        return command, target, ticks - 1
+
+    @staticmethod
+    def _walking_activity(command):
+        return jp.clip(jp.maximum(jp.abs(command[0]) / 0.01,
+                                  jp.abs(command[1]) / 0.10), 0.0, 1.0)
+
+    @staticmethod
+    def _body_planar_velocity(velocity_world, body_forward_xy):
+        right = jp.array([body_forward_xy[1], -body_forward_xy[0]])
+        return velocity_world[:2] @ body_forward_xy, velocity_world[:2] @ right
+
     def _get_observation(
         self,
         command_history: jp.ndarray,
@@ -1486,16 +1608,17 @@ class Joystick(mjx_env.MjxEnv):
         gyro_measurement: jp.ndarray,
         phase: jp.ndarray,
         heading_error: jp.ndarray = jp.array(0.0),
+        motion_command: jp.ndarray = jp.zeros(2),
     ) -> jp.ndarray:
-        """Builds the deployment observation (107 values by default).
+        """Builds the deployment observation (108 values by default).
 
         With the default 12-frame history, the layout is:
           0:96   normalized command history, oldest to newest
           96:99  unit gravity estimate in IMU coordinates
           99:102 scaled gyroscope in IMU coordinates
           102:104 sin/cos gait clock
-          104     commanded speed in m/s
-          105:107 sin/cos estimated heading minus heading at START (optional)
+          104:106 commanded body-forward speed (m/s), turn rate (rad/s)
+          106:108 sin/cos estimated heading minus commanded heading (optional)
         """
         clock = jp.array([jp.sin(phase), jp.cos(phase)])
         parts = [
@@ -1503,7 +1626,7 @@ class Joystick(mjx_env.MjxEnv):
             gravity_estimate,
             self._gyro_obs_scale * gyro_measurement,
             clock,
-            jp.array([self._target_velocity]),
+            motion_command,
         ]
         if self._heading_observation:
             parts.append(jp.array([jp.sin(heading_error), jp.cos(heading_error)]))
@@ -1710,6 +1833,8 @@ class Joystick(mjx_env.MjxEnv):
         phase: jp.ndarray,
         foot_velocities_world: jp.ndarray,
         body_velocity_world: jp.ndarray,
+        motion_command: jp.ndarray,
+        body_yaw_rate: jp.ndarray,
     ) -> tuple[jp.ndarray, jp.ndarray]:
         foot_offsets_xy = (
             foot_positions_world[:, :2] - body_position_world[:2]
@@ -1719,25 +1844,36 @@ class Joystick(mjx_env.MjxEnv):
         phase_sin = jp.sin(foot_phases)
         swing = jp.square(jp.maximum(phase_sin, 0.0))
         stance = jp.square(jp.minimum(phase_sin, 0.0))
-        foot_rel_forward_velocity = (
+        yaw_tangent = jp.stack(
+            [-foot_offsets_xy[:, 1], foot_offsets_xy[:, 0]], axis=1
+        )
+        # Differentiate in the rotating body frame: a planted stance foot
+        # retracts relative to both body translation and body rotation.
+        foot_relative_velocity = (
             foot_velocities_world[:, :2] - body_velocity_world[:2]
-        ) @ body_forward_xy
-        v_target = jp.maximum(self._target_velocity, 1e-3)
-        # Score each foot individually via tanh so one dominant leg cannot
-        # compensate for an inactive opposite leg.
+            - body_yaw_rate * yaw_tangent
+        )
+        # Rigid-body command at each foot includes yaw. This gives opposite
+        # fore/aft stepping directions for the two feet during a pivot turn.
+        yaw_velocity = motion_command[1] * yaw_tangent
+        desired_velocity = motion_command[0] * body_forward_xy + yaw_velocity
+        speed = jp.linalg.norm(desired_velocity, axis=1)
+        direction = desired_velocity / jp.maximum(speed[:, None], 1e-3)
+        relative_speed = jp.sum(foot_relative_velocity * direction, axis=1)
         vel_credit = 0.5 * jp.sum(
-            swing * jp.tanh(foot_rel_forward_velocity / (2.0 * v_target))
-            + stance * jp.tanh(-foot_rel_forward_velocity / v_target)
+            swing * jp.tanh(relative_speed / jp.maximum(2.0 * speed, 1e-3))
+            + stance * jp.tanh(-relative_speed / jp.maximum(speed, 1e-3))
         )
-        # Each foot must independently trail the COM at liftoff (-cos < 0)
-        # and lead the COM at touchdown (-cos > 0).
-        d_half = jp.maximum(0.5 * self._kinematic_step_distance, 1e-3)
-        foot_rel_forward = (
-            foot_forward_positions - self._nominal_foot_forward_positions
-        )
+        # Placement follows signed forward velocity at each foot, supporting
+        # reverse motion and the asymmetric strides needed while turning.
+        foot_forward_speed = desired_velocity @ body_forward_xy
+        d_half = jp.maximum(jp.abs(foot_forward_speed) / (4.0 * self._step_frequency), 1e-3)
+        foot_rel_forward = foot_forward_positions - self._nominal_foot_forward_positions
         placement_credit = 0.5 * jp.sum(
-            jp.square(jp.cos(foot_phases))
-            * jp.tanh(-jp.cos(foot_phases) * foot_rel_forward / d_half)
+            jp.square(jp.cos(foot_phases)) * jp.tanh(
+                -jp.cos(foot_phases) * foot_rel_forward
+                * jp.sign(foot_forward_speed) / d_half
+            )
         )
         reward = self._swing_foot_forward_reward_weight * (
             vel_credit + placement_credit
