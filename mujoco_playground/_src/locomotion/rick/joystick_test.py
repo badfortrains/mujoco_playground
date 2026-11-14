@@ -22,6 +22,7 @@ class JoystickTest(absltest.TestCase):
     self.env._gyro_obs_scale = 0.25
     self.env._target_velocity = 0.04
     self.env._heading_observation = False
+    self.env._foot_sphere_geom_ids = None
 
   def test_default_retraining_config(self):
     config = joystick.default_config()

@@ -187,7 +187,32 @@ class Joystick(mjx_env.MjxEnv):
 
         path = consts.task_to_xml(task)
         self._xml_path = path.as_posix()
-        self._mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
+        spec = mujoco.MjSpec.from_file(path.as_posix())
+        has_corner_spheres = any(
+            geom.name == 'left_foot_collision_1' for geom in spec.geoms
+        )
+        contact_sensor_suffixes = ('',)
+        if has_corner_spheres:
+            # MJX JAX does not support body-matched contact sensors. Expand
+            # each foot sensor into four geom-matched sensors on both backends.
+            contact_sensor_suffixes = ('_1', '_2', '_3', '_4')
+            for side in ('left', 'right'):
+                sensor_name = f'{side}_foot_floor_found'
+                sensor = next(s for s in spec.sensors if s.name == sensor_name)
+                sensor.name = f'{sensor_name}_1'
+                sensor.objtype = mujoco.mjtObj.mjOBJ_GEOM
+                sensor.objname = f'{side}_foot_collision_1'
+                for corner in (2, 3, 4):
+                    spec.add_sensor(
+                        name=f'{sensor_name}_{corner}',
+                        type=mujoco.mjtSensor.mjSENS_CONTACT,
+                        objtype=mujoco.mjtObj.mjOBJ_GEOM,
+                        objname=f'{side}_foot_collision_{corner}',
+                        reftype=mujoco.mjtObj.mjOBJ_GEOM,
+                        refname='floor',
+                        intprm=[1, 1, 1],  # found, mindist, one slot.
+                    )
+        self._mj_model = spec.compile()
         self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
         self._mj_model.opt.iterations = 10
         self._mj_model.opt.ls_iterations = 6
@@ -363,34 +388,37 @@ class Joystick(mjx_env.MjxEnv):
                 'right_foot_center',
             ),
         ])
+        # Four corner spheres replace the single mesh/box sole in newer XMLs.
+        # Their numbering is toe (-Y): 1, 2; heel (+Y): 3, 4.
+        self._foot_sphere_geom_ids = None
+        pair_suffixes = ('',)
+        if has_corner_spheres:
+            pair_suffixes = ('_1', '_2', '_3', '_4')
+            sphere_ids = np.array([
+                [self._mj_model.geom(f'{side}_foot_collision{suffix}').id
+                 for suffix in pair_suffixes]
+                for side in ('left', 'right')
+            ])
+            if np.any(
+                self._mj_model.geom_type[sphere_ids]
+                != mujoco.mjtGeom.mjGEOM_SPHERE
+            ):
+                raise ValueError('Rick corner foot collisions must be spheres')
+            self._foot_sphere_geom_ids = jp.array(sphere_ids)
+            self._foot_sphere_radii = jp.array(
+                self._mj_model.geom_size[sphere_ids, 0]
+            )
         self._foot_floor_pair_ids = jp.array([
-            mujoco.mj_name2id(
-                self._mj_model,
-                mujoco.mjtObj.mjOBJ_PAIR.value,
-                'left_foot_floor',
-            ),
-            mujoco.mj_name2id(
-                self._mj_model,
-                mujoco.mjtObj.mjOBJ_PAIR.value,
-                'right_foot_floor',
-            ),
+            self._mj_model.pair(f'{side}_foot_floor{suffix}').id
+            for side in ('left', 'right')
+            for suffix in pair_suffixes
         ])
-        foot_contact_sensor_ids = [
-            mujoco.mj_name2id(
-                self._mj_model,
-                mujoco.mjtObj.mjOBJ_SENSOR.value,
-                'left_foot_floor_found',
-            ),
-            mujoco.mj_name2id(
-                self._mj_model,
-                mujoco.mjtObj.mjOBJ_SENSOR.value,
-                'right_foot_floor_found',
-            ),
-        ]
         self._foot_contact_sensor_adrs = jp.array(
             [
-                self._mj_model.sensor_adr[sensor_id]
-                for sensor_id in foot_contact_sensor_ids
+                [self._mj_model.sensor(
+                    f'{side}_foot_floor_found{suffix}'
+                ).adr[0] for suffix in contact_sensor_suffixes]
+                for side in ('left', 'right')
             ]
         )
 
@@ -407,7 +435,10 @@ class Joystick(mjx_env.MjxEnv):
             self._mj_model, default_data, default_keyframe.id
         )
         mujoco.mj_forward(self._mj_model, default_data)
-        self._sole_corners = jp.array(self._get_sole_corners(default_data))
+        self._sole_corners = (
+            jp.array(self._get_sole_corners(default_data))
+            if self._foot_sphere_geom_ids is None else None
+        )
         actuator_joint_ids = self._mj_model.actuator_trnid[:, 0]
         # Characteristic physical scales derived from the robot's XML leg length
         # (hip joints / CoM above the standing soles, invariant to CAD body
@@ -1029,16 +1060,16 @@ class Joystick(mjx_env.MjxEnv):
             )
         )
 
-        foot_contacts = (
-            data.sensordata[self._foot_contact_sensor_adrs] > 0
+        foot_contacts = jp.any(
+            data.sensordata[self._foot_contact_sensor_adrs] > 0, axis=1
         )
         foot_phase_reward, swing_lift_reward, swing_airborne_reward = (
             self._get_foot_height_rewards(
                 phase, foot_contacts, toe_clearance, heel_clearance
             )
         )
-        foot_contacts_before = (
-            data0.sensordata[self._foot_contact_sensor_adrs] > 0
+        foot_contacts_before = jp.any(
+            data0.sensordata[self._foot_contact_sensor_adrs] > 0, axis=1
         )
         foot_slip_cost = self._get_foot_slip_cost(
             foot_velocities_world,
@@ -1381,11 +1412,22 @@ class Joystick(mjx_env.MjxEnv):
     def _get_foot_clearances(
         self, data: mjx.Data
     ) -> tuple[jp.ndarray, jp.ndarray]:
-        """Lowest toe/heel corner heights above this task's flat z=0 floor.
+        """Lowest toe/heel collision heights above this task's flat z=0 floor.
 
         Keeping both lateral corners catches roll as well as pitch.  Preserve
         negative heights in diagnostics so penetration is visible.
         """
+        if self._foot_sphere_geom_ids is not None:
+            # A sphere's bottom is always radius below its world-space center;
+            # rotating a fixed local bottom point would overestimate clearance.
+            heights = (
+                data.geom_xpos[self._foot_sphere_geom_ids, 2]
+                - self._foot_sphere_radii
+            )
+            return (
+                jp.min(heights[:, :2], axis=1),
+                jp.min(heights[:, 2:], axis=1),
+            )
         rotations = data.site_xmat[self._feet_site_ids].reshape((-1, 3, 3))
         heights = (
             jp.einsum('fkj,fj->fk', self._sole_corners, rotations[:, 2, :])
