@@ -24,23 +24,15 @@ DATA_FIELDS = (
 )
 
 
-def collect(env, policy, seeds, steps, action_repeat=1, target_commands=None):
+def collect(env, policy, seeds, steps, action_repeat=1):
   """Returns [seed, time, ...] arrays. The terminal transition is valid.
 
   Uses the unwrapped environment: no resets or discarded terminal states.
   After termination, state is frozen and valid=False. Observations are inputs
   to action; data, metrics, and info describe the resulting state.
-
-  Optional Rick target_commands has shape [len(seeds), 2]. It replaces each
-  reset target and holds it throughout the rollout, retaining the START ramp
-  and the reset RNG draws. Repeated seeds allow paired command comparisons.
   """
   if steps < 1 or action_repeat < 1 or not seeds:
     raise ValueError('Positive steps/action_repeat and at least one seed required')
-  if target_commands is not None:
-    target_commands = np.asarray(target_commands, dtype=np.float32)
-    if target_commands.shape != (len(seeds), 2) or not np.all(np.isfinite(target_commands)):
-      raise ValueError('target_commands must be finite with shape [len(seeds), 2]')
 
   def snapshot(state):
     return {
@@ -49,17 +41,9 @@ def collect(env, policy, seeds, steps, action_repeat=1, target_commands=None):
         'info': jax.tree.map(lambda x: x, state.info),
     }
 
-  def one(seed, target=None):
+  def one(seed):
     key = jax.random.PRNGKey(seed)
     state = env.reset(key)
-    if target is not None:
-      if not {'target_command', 'command_ticks', 'motion_command'} <= state.info.keys():
-        raise ValueError('Fixed targets require a Rick motion-command environment')
-      # Initial motion/observation remain zero; normal acceleration limits apply.
-      state = state.replace(info={
-          **state.info, 'target_command': target,
-          'command_ticks': jp.array(steps * action_repeat + 1, dtype=jp.int32),
-      })
     initial = snapshot(state)
 
     def step(carry, unused):
@@ -112,10 +96,7 @@ def collect(env, policy, seeds, steps, action_repeat=1, target_commands=None):
     )
     return initial, trace
 
-  keys = jp.array(seeds, dtype=jp.uint32)
-  if target_commands is None:
-    return jax.device_get(jax.jit(jax.vmap(one))(keys))
-  return jax.device_get(jax.jit(jax.vmap(one))(keys, jp.asarray(target_commands)))
+  return jax.device_get(jax.jit(jax.vmap(one))(jp.array(seeds, dtype=jp.uint32)))
 
 
 def flatten(tree, prefix=''):

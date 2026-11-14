@@ -66,38 +66,6 @@ def policy(obs, key):
 
 
 class DiagnosticsTest(unittest.TestCase):
-  def test_fixed_commands_keep_random_conditions_and_start_ramp(self):
-    class CommandEnv(CounterEnv):
-      def reset(self, key):
-        state = super().reset(key)
-        return state.replace(info={
-            **state.info, 'target_command': jp.array([.01, 0.]),
-            'motion_command': jp.zeros(2), 'command_ticks': jp.array(1),
-        })
-
-      def step(self, state, action):
-        state = super().step(state, action)
-        motion = state.info['motion_command'] + jp.clip(
-            state.info['target_command'] - state.info['motion_command'], -.001, .001)
-        return state.replace(info={**state.info, 'motion_command': motion})
-
-    commands = [[.03, 0.], [.06, 0.]]
-    initial, trace = diagnostics.collect(CommandEnv(), policy, [2, 2], 5,
-                                          target_commands=commands)
-    np.testing.assert_array_equal(initial['info']['sample'][0], initial['info']['sample'][1])
-    np.testing.assert_allclose(initial['info']['target_command'], commands)
-    np.testing.assert_array_equal(initial['info']['motion_command'], 0.)
-    np.testing.assert_array_equal(initial['info']['command_ticks'], [6, 6])
-    np.testing.assert_allclose(trace['info']['motion_command'][:, 0, 0], [.001, .001])
-    np.testing.assert_array_equal(trace['valid'], [[1, 1, 0, 0, 0]] * 2)
-
-  def test_fixed_commands_validate_layout_and_finiteness(self):
-    for commands in ([[.03, 0.], [.06, 0.]], [[float('nan'), 0.]], [[.03]]):
-      with self.assertRaisesRegex(ValueError, 'target_commands'):
-        diagnostics.collect(CounterEnv(), policy, [0], 5, target_commands=commands)
-    with self.assertRaisesRegex(ValueError, 'motion-command'):
-      diagnostics.collect(CounterEnv(), policy, [0], 5, target_commands=[[.03, 0.]])
-
   def test_yaw_recovery_requires_heading_and_forward_motion(self):
     time = np.arange(1, 151) * .02
     torque = np.zeros(150)

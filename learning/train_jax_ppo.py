@@ -76,11 +76,6 @@ _ENV_NAME = flags.DEFINE_string(
     "LeapCubeReorient",
     f"Name of the environment. One of {', '.join(registry.ALL_ENVS)}",
 )
-_RICK_COMMAND_STAGE = flags.DEFINE_enum(
-    "rick_command_stage", None, ["walk", "speed", "transitions", "speed_jumps", "speed_levels", "turns", "full"],
-    "Rick command curriculum stage; explicit playground overrides take precedence. "
-    "Advance stages between runs after checking gait quality.",
-)
 _IMPL = flags.DEFINE_enum("impl", "jax", ["jax", "warp"], "MJX implementation")
 _PLAYGROUND_CONFIG_OVERRIDES = flags.DEFINE_string(
     "playground_config_overrides",
@@ -333,11 +328,6 @@ def main(argv):
   if _VISION.value:
     env_cfg_overrides["vision"] = True
     env_cfg_overrides["vision_config.nworld"] = ppo_params.num_envs
-  if _RICK_COMMAND_STAGE.value is not None:
-    if _ENV_NAME.value != "RickJoystickFlatTerrain":
-      raise ValueError("--rick_command_stage is only supported for RickJoystickFlatTerrain")
-    from mujoco_playground._src.locomotion.rick import joystick as rick_joystick
-    env_cfg_overrides.update(rick_joystick.command_stage_overrides(_RICK_COMMAND_STAGE.value))
   if _PLAYGROUND_CONFIG_OVERRIDES.value is not None:
     env_cfg_overrides.update(json.loads(_PLAYGROUND_CONFIG_OVERRIDES.value))
 
@@ -424,37 +414,27 @@ def main(argv):
   if "num_eval_envs" in training_params:
     del training_params["num_eval_envs"]
 
-  if (_ENV_NAME.value == "RickJoystickFlatTerrain"
-      and restore_checkpoint_path is not None):
-    saved_env = json.loads((restore_checkpoint_path.parent / "config.json").read_text())
-    if saved_env.get("motion_command_version", 0) == 0:
-      if _PLAY_ONLY.value:
-        raise ValueError("Use the saved source to replay a fixed-speed checkpoint; command conversion is training-only")
-      from brax.training.agents.ppo import checkpoint as ppo_checkpoint
-      from mujoco_playground._src.locomotion.rick import checkpoint_upgrade
-      saved_network = json.loads((restore_checkpoint_path / "ppo_network_config.json").read_text())
-      if saved_network['action_size'] != env.action_size:
-        raise ValueError("Walking checkpoint action dimension does not match Rick")
-      speed_index = checkpoint_upgrade.validate_walking_upgrade(
-          saved_env, env_cfg, saved_network['observation_size']['shape'][0], env.action_size,
+  # Rick appends estimated sin/cos heading to the existing observation. Pad
+  # only this known transition, keeping old policy/value outputs unchanged.
+  # Play-only uses saved configs above and must never migrate a checkpoint.
+  if (_ENV_NAME.value == "RickJoystickFlatTerrain" and not _PLAY_ONLY.value
+      and restore_checkpoint_path is not None and env_cfg.get("heading_observation", False)):
+    from brax.training.agents.ppo import checkpoint as ppo_checkpoint
+    from mujoco_playground._src.locomotion.rick import checkpoint_upgrade
+    saved_network = json.loads(
+        (restore_checkpoint_path / "ppo_network_config.json").read_text()
+    )
+    old_dim = saved_network["observation_size"]["shape"][0]
+    if old_dim + 2 == env.observation_size:
+      saved_env = json.loads((restore_checkpoint_path.parent / "config.json").read_text())
+      if (saved_env.get("heading_observation", False)
+          or saved_env["command_history_length"] != env_cfg.command_history_length
+          or saved_network["action_size"] != env.action_size):
+        raise ValueError("Checkpoint is not a compatible pre-heading Rick policy")
+      training_params["restore_params"] = checkpoint_upgrade.add_heading_inputs(
+          ppo_checkpoint.load(restore_checkpoint_path), old_dim
       )
-      training_params['restore_params'] = checkpoint_upgrade.add_motion_command_input(
-          ppo_checkpoint.load(restore_checkpoint_path), speed_index, saved_env['target_velocity'],
-      )
-      print(f"Warm-started walking policy with speed/yaw inputs: {speed_index + 3} -> {env.observation_size}")
-      restore_checkpoint_path = None
-    elif saved_env.get("motion_command_version") != env_cfg.motion_command_version:
-      raise ValueError("Unsupported Rick command checkpoint version")
-    elif (not _PLAY_ONLY.value
-          and tuple(saved_env.get('yaw_rate_range', ())) == (0.0, 0.0)
-          and tuple(env_cfg.yaw_rate_range) != (0.0, 0.0)):
-      from brax.training.agents.ppo import checkpoint as ppo_checkpoint
-      from mujoco_playground._src.locomotion.rick import checkpoint_upgrade
-      yaw_index = env_cfg.command_history_length * env.action_size + 9
-      training_params['restore_params'] = checkpoint_upgrade.activate_turn_command(
-          ppo_checkpoint.load(restore_checkpoint_path), yaw_index,
-      )
-      print("Enabled yaw command from straight-only checkpoint; seeded yaw normalization")
+      print(f"Upgraded Rick checkpoint inputs: {old_dim} -> {env.observation_size}")
       restore_checkpoint_path = None
 
   train_fn = functools.partial(

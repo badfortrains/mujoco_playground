@@ -549,15 +549,14 @@ class JoystickTest(absltest.TestCase):
         gravity,
         gyro,
         jp.array(0.0),
-        motion_command=jp.array([.04, .2]),
     )
 
-    self.assertEqual(observation.shape, (106,))
+    self.assertEqual(observation.shape, (105,))
     np.testing.assert_allclose(observation[:96], command_history.flatten())
     np.testing.assert_allclose(observation[96:99], gravity)
     np.testing.assert_allclose(observation[99:102], 0.25 * gyro)
     np.testing.assert_allclose(observation[102:104], jp.array([0.0, 1.0]))
-    np.testing.assert_allclose(observation[104:106], [.04, .2])
+    self.assertAlmostEqual(float(observation[104]), 0.04)
 
   def test_heading_observation_appends_estimated_relative_heading(self):
     self.env._heading_observation = True
@@ -566,8 +565,8 @@ class JoystickTest(absltest.TestCase):
           jp.zeros((12, 8)), jp.array([0., 0., -1.]), jp.zeros(3),
           jp.array(0.0), jp.array(angle),
       )
-      self.assertEqual(obs.shape, (108,))
-      np.testing.assert_allclose(obs[106:], [np.sin(angle), np.cos(angle)], atol=3e-7)
+      self.assertEqual(obs.shape, (107,))
+      np.testing.assert_allclose(obs[105:], [np.sin(angle), np.cos(angle)], atol=3e-7)
 
   def test_heading_uses_forward_axis_and_survives_wrap_and_quaternion_sign(self):
     from brax import math
