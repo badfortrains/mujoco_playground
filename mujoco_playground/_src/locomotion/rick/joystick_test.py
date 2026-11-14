@@ -39,8 +39,13 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(tuple(config.foot_friction_range), (0.20, 0.60))
     self.assertEqual(
         tuple(config.center_of_mass_offset_scale),
-        (0.005, 0.005, 0.0020),
+        (0.002, 0.002, 0.001),
     )
+    self.assertEqual(
+        tuple(config.battery_position_offset_scale),
+        (0.007, 0.007, 0.007),
+    )
+    self.assertEqual(tuple(config.battery_mass_scale_range), (0.90, 1.10))
     self.assertEqual(tuple(config.servo_stiffness_range), (1.0, 1.0))
     self.assertEqual(
         tuple(config.servo_frictionloss_range), (0.010, 0.025)
@@ -449,6 +454,7 @@ class JoystickTest(absltest.TestCase):
             [4.0, 5.0, 6.0],
         ])
     )
+    self.env._battery_body_id = 2
 
     body_ipos = self.env._body_ipos_with_com_offset(
         jp.array([0.1, -0.2, 0.3])
@@ -460,6 +466,50 @@ class JoystickTest(absltest.TestCase):
         jp.array([
             [1.1, 1.8, 3.3],
             [4.1, 4.8, 6.3],
+        ]),
+        atol=1e-6,
+    )
+
+  def test_battery_randomization_only_changes_battery_properties(self):
+    self.env._battery_body_id = 2
+    self.env._mjx_model = SimpleNamespace(
+        body_ipos=jp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+        ]),
+        body_mass=jp.array([0.0, 0.20, 0.03]),
+        body_inertia=jp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [0.1, 0.2, 0.3],
+        ]),
+    )
+
+    properties = self.env._randomized_body_properties(
+        center_of_mass_offset=jp.zeros(3),
+        battery_position_offset=jp.array([0.007, -0.006, 0.005]),
+        battery_mass_scale=jp.array(1.1),
+    )
+
+    np.testing.assert_allclose(
+        properties['body_ipos'],
+        jp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [4.007, 4.994, 6.005],
+        ]),
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        properties['body_mass'], jp.array([0.0, 0.20, 0.033]), atol=1e-6
+    )
+    np.testing.assert_allclose(
+        properties['body_inertia'],
+        jp.array([
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 3.0],
+            [0.11, 0.22, 0.33],
         ]),
         atol=1e-6,
     )

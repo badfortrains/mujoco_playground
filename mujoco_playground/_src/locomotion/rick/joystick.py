@@ -92,11 +92,11 @@ def default_config() -> config_dict.ConfigDict:
         # XML contact coefficient or on a single floor material.
         'foot_friction_range': (0.20, 0.60),
 
-        # Shared local-frame offset applied to every non-world inertial frame.
-        # Because Rick's link frames are aligned in the nominal pose, this
-        # shifts the whole-robot COM by approximately the sampled offset while
-        # preserving the relative mass contribution of each link.
-        'center_of_mass_offset_scale': (0.005, 0.005, 0.0020),  # m.
+        # Residual whole-robot COM uncertainty.  Battery placement and mass
+        # have separate, physically targeted randomization below.
+        'center_of_mass_offset_scale': (0.002, 0.002, 0.001),  # m.
+        'battery_position_offset_scale': (0.007, 0.007, 0.007),  # m.
+        'battery_mass_scale_range': (0.90, 1.10),
 
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
@@ -272,6 +272,12 @@ class Joystick(mjx_env.MjxEnv):
         self._center_of_mass_offset_scale = jp.array(
             config.center_of_mass_offset_scale
         )
+        self._battery_position_offset_scale = jp.array(config.get(
+            'battery_position_offset_scale', (0.0, 0.0, 0.0)
+        ))
+        self._battery_mass_scale_range = tuple(config.get(
+            'battery_mass_scale_range', (1.0, 1.0)
+        ))
 
         self._root_position_noise_scale = jp.array(
             config.root_position_noise_scale
@@ -393,6 +399,11 @@ class Joystick(mjx_env.MjxEnv):
             self._mj_model,
             mujoco.mjtObj.mjOBJ_BODY.value,
             'body',
+        )
+        self._battery_body_id = mujoco.mj_name2id(
+            self._mj_model,
+            mujoco.mjtObj.mjOBJ_BODY.value,
+            'battery_1',
         )
         self._imu_site_id = mujoco.mj_name2id(
             self._mj_model,
@@ -546,9 +557,11 @@ class Joystick(mjx_env.MjxEnv):
             action_delay_key,
             foot_friction_key,
             center_of_mass_key,
+            battery_position_key,
+            battery_mass_key,
             initial_gyro_key,
             step_key,
-        ) = jax.random.split(rng, 24)
+        ) = jax.random.split(rng, 26)
 
         qpos = self._default_qpos
         root_position_noise = jax.random.uniform(
@@ -671,6 +684,17 @@ class Joystick(mjx_env.MjxEnv):
             minval=-self._center_of_mass_offset_scale,
             maxval=self._center_of_mass_offset_scale,
         )
+        battery_position_offset = jax.random.uniform(
+            battery_position_key,
+            (3,),
+            minval=-self._battery_position_offset_scale,
+            maxval=self._battery_position_offset_scale,
+        )
+        battery_mass_scale = self._sample_uniform(
+            battery_mass_key,
+            self._battery_mass_scale_range,
+            (),
+        )
 
         motor_targets = jp.clip(
             self._default_pose + servo_center_offset,
@@ -687,11 +711,13 @@ class Joystick(mjx_env.MjxEnv):
             naconmax=self._config.naconmax,
             njmax=self._config.njmax,
         )
-        reset_model = self._mjx_model.tree_replace({
-            'body_ipos': self._body_ipos_with_com_offset(
-                center_of_mass_offset
-            ),
-        })
+        reset_model = self._mjx_model.tree_replace(
+            self._randomized_body_properties(
+                center_of_mass_offset,
+                battery_position_offset,
+                battery_mass_scale,
+            )
+        )
         data = mjx.forward(reset_model, data)
 
         phase = jax.random.uniform(
@@ -811,6 +837,10 @@ class Joystick(mjx_env.MjxEnv):
             'center_of_mass_offset_x': center_of_mass_offset[0],
             'center_of_mass_offset_y': center_of_mass_offset[1],
             'center_of_mass_offset_z': center_of_mass_offset[2],
+            'battery_position_offset_x': battery_position_offset[0],
+            'battery_position_offset_y': battery_position_offset[1],
+            'battery_position_offset_z': battery_position_offset[2],
+            'battery_mass_scale': battery_mass_scale,
         }
 
         return mjx_env.State(
@@ -839,6 +869,8 @@ class Joystick(mjx_env.MjxEnv):
                 'action_delay': action_delay,
                 'foot_friction': foot_friction,
                 'center_of_mass_offset': center_of_mass_offset,
+                'battery_position_offset': battery_position_offset,
+                'battery_mass_scale': battery_mass_scale,
                 'phase': phase,
                 'imu_quat': imu_quat,
                 'heading_reference': heading_reference,
@@ -1010,9 +1042,6 @@ class Joystick(mjx_env.MjxEnv):
             (self._foot_floor_pair_ids.shape[0], 2),
             state.info['foot_friction'],
         ))
-        body_ipos = self._body_ipos_with_com_offset(
-            state.info['center_of_mass_offset']
-        )
         step_model = self._mjx_model.tree_replace({
             'actuator_gainprm': actuator_gainprm,
             'actuator_biasprm': actuator_biasprm,
@@ -1022,7 +1051,11 @@ class Joystick(mjx_env.MjxEnv):
             ),
             'dof_frictionloss': dof_frictionloss,
             'pair_friction': pair_friction,
-            'body_ipos': body_ipos,
+            **self._randomized_body_properties(
+                state.info['center_of_mass_offset'],
+                state.info['battery_position_offset'],
+                state.info['battery_mass_scale'],
+            ),
         })
         data = mjx_env.step(
             step_model,
@@ -1321,6 +1354,16 @@ class Joystick(mjx_env.MjxEnv):
             center_of_mass_offset_z=(
                 state.info['center_of_mass_offset'][2]
             ),
+            battery_position_offset_x=(
+                state.info['battery_position_offset'][0]
+            ),
+            battery_position_offset_y=(
+                state.info['battery_position_offset'][1]
+            ),
+            battery_position_offset_z=(
+                state.info['battery_position_offset'][2]
+            ),
+            battery_mass_scale=state.info['battery_mass_scale'],
         )
 
         return state.replace(
@@ -1603,11 +1646,46 @@ class Joystick(mjx_env.MjxEnv):
     def _body_ipos_with_com_offset(
         self,
         center_of_mass_offset: jp.ndarray,
+        battery_position_offset: jp.ndarray = jp.zeros(3),
     ) -> jp.ndarray:
-        """Applies a shared COM offset without modifying the world body."""
-        return self._mjx_model.body_ipos.at[1:].add(
+        """Applies residual COM and battery offsets, preserving the world."""
+        body_ipos = self._mjx_model.body_ipos.at[1:].add(
             center_of_mass_offset
         )
+        if self._battery_body_id < 0:
+            return body_ipos
+        return body_ipos.at[self._battery_body_id].add(
+            battery_position_offset
+        )
+
+    def _randomized_body_properties(
+        self,
+        center_of_mass_offset: jp.ndarray,
+        battery_position_offset: jp.ndarray,
+        battery_mass_scale: jp.ndarray,
+    ) -> dict[str, jp.ndarray]:
+        """Returns per-episode inertial properties for the MJX model."""
+        if self._battery_body_id < 0:
+            return {
+                'body_ipos': self._body_ipos_with_com_offset(
+                    center_of_mass_offset
+                ),
+                'body_mass': self._mjx_model.body_mass,
+                'body_inertia': self._mjx_model.body_inertia,
+            }
+        body_mass = self._mjx_model.body_mass.at[self._battery_body_id].multiply(
+            battery_mass_scale
+        )
+        body_inertia = self._mjx_model.body_inertia.at[
+            self._battery_body_id
+        ].multiply(battery_mass_scale)
+        return {
+            'body_ipos': self._body_ipos_with_com_offset(
+                center_of_mass_offset, battery_position_offset
+            ),
+            'body_mass': body_mass,
+            'body_inertia': body_inertia,
+        }
 
     def _get_observation(
         self,
