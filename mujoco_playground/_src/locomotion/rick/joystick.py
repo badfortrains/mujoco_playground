@@ -154,6 +154,16 @@ def default_config() -> config_dict.ConfigDict:
         'flight_cost_weight': 1.0,
         'swing_lift_reward_weight': 2.0,
         'swing_airborne_reward_weight': 2.0,
+        # Track the phase-dependent sole-clearance target without forcing
+        # perfectly rigid trajectories.  Undershoot is more costly so the
+        # weaker foot is encouraged to lift; overshoot gets a 25% clearance
+        # margin before it is penalized.  A separate cap catches unusually
+        # high steps regardless of where they occur in the swing.
+        'swing_height_undershoot_cost_weight': 0.5,
+        'swing_height_overshoot_cost_weight': 0.25,
+        'swing_height_overshoot_tolerance': 0.25,
+        'excessive_swing_height_cost_weight': 1.0,
+        'excessive_swing_height_threshold': 1.25,
         'swing_foot_forward_reward_weight': 2.0,
         'foot_slip_cost_weight': 12.0,
         'energy_cost_weight': 0.005,
@@ -353,6 +363,21 @@ class Joystick(mjx_env.MjxEnv):
         self._swing_lift_reward_weight = config.swing_lift_reward_weight
         self._swing_airborne_reward_weight = (
             config.swing_airborne_reward_weight
+        )
+        self._swing_height_undershoot_cost_weight = (
+            config.swing_height_undershoot_cost_weight
+        )
+        self._swing_height_overshoot_cost_weight = (
+            config.swing_height_overshoot_cost_weight
+        )
+        self._swing_height_overshoot_tolerance = (
+            config.swing_height_overshoot_tolerance
+        )
+        self._excessive_swing_height_cost_weight = (
+            config.excessive_swing_height_cost_weight
+        )
+        self._excessive_swing_height_threshold = (
+            config.excessive_swing_height_threshold
         )
         self._swing_foot_forward_reward_weight = (
             config.swing_foot_forward_reward_weight
@@ -735,6 +760,12 @@ class Joystick(mjx_env.MjxEnv):
             'reward_foot_phase': zero,
             'reward_swing_lift': zero,
             'reward_swing_airborne': zero,
+            'cost_swing_height_tracking': zero,
+            'cost_excessive_swing_height': zero,
+            'cost_left_swing_height_tracking': zero,
+            'cost_right_swing_height_tracking': zero,
+            'cost_left_excessive_swing_height': zero,
+            'cost_right_excessive_swing_height': zero,
             'reward_swing_foot_forward': zero,
             'reward_alive': zero,
             'cost_sideways_velocity': zero,
@@ -1068,6 +1099,13 @@ class Joystick(mjx_env.MjxEnv):
                 phase, foot_contacts, toe_clearance, heel_clearance
             )
         )
+        swing_height_tracking_costs, excessive_swing_height_costs = (
+            self._get_foot_height_costs(
+                phase, toe_clearance, heel_clearance
+            )
+        )
+        swing_height_tracking_cost = jp.sum(swing_height_tracking_costs)
+        excessive_swing_height_cost = jp.sum(excessive_swing_height_costs)
         foot_contacts_before = jp.any(
             data0.sensordata[self._foot_contact_sensor_adrs] > 0, axis=1
         )
@@ -1165,6 +1203,8 @@ class Joystick(mjx_env.MjxEnv):
             - vertical_velocity_cost
             - foot_slip_cost
             - energy_cost
+            - swing_height_tracking_cost
+            - excessive_swing_height_cost
         )
 
         # Build deployment-like raw IMU samples at the XML's IMU site.  An
@@ -1224,6 +1264,12 @@ class Joystick(mjx_env.MjxEnv):
             reward_foot_phase=foot_phase_reward,
             reward_swing_lift=swing_lift_reward,
             reward_swing_airborne=swing_airborne_reward,
+            cost_swing_height_tracking=-swing_height_tracking_cost,
+            cost_excessive_swing_height=-excessive_swing_height_cost,
+            cost_left_swing_height_tracking=-swing_height_tracking_costs[0],
+            cost_right_swing_height_tracking=-swing_height_tracking_costs[1],
+            cost_left_excessive_swing_height=-excessive_swing_height_costs[0],
+            cost_right_excessive_swing_height=-excessive_swing_height_costs[1],
             reward_swing_foot_forward=swing_foot_forward_reward,
             reward_alive=healthy_reward,
             cost_sideways_velocity=-sideways_velocity_cost,
@@ -1483,6 +1529,48 @@ class Joystick(mjx_env.MjxEnv):
             swing * (1.0 - contact) * airborne_clearance
         )
         return foot_phase_reward, swing_lift_reward, swing_airborne_reward
+
+    def _get_foot_height_costs(
+        self,
+        phase: jp.ndarray,
+        toe_clearance: jp.ndarray,
+        heel_clearance: jp.ndarray,
+    ) -> tuple[jp.ndarray, jp.ndarray]:
+        """Returns per-foot phase tracking and excessive-clearance costs.
+
+        The feet are half a cycle apart, so comparing their instantaneous
+        heights directly would penalize the intended gait.  Instead, score
+        each sole against the same phase-dependent target.  Small overshoot is
+        tolerated, while a second phase-weighted hinge limits exceptionally
+        high steps above a fixed fraction of the natural clearance scale.
+        """
+        foot_phases = phase + jp.array([0.0, jp.pi])
+        swing = jp.square(jp.maximum(jp.sin(foot_phases), 0.0))
+        desired = self._natural_clearance_scale * swing
+        clearance = jp.minimum(toe_clearance, heel_clearance)
+        normalized_error = (clearance - desired) / self._natural_clearance_scale
+
+        undershoot = jp.maximum(-normalized_error, 0.0)
+        overshoot = jp.maximum(
+            normalized_error - self._swing_height_overshoot_tolerance,
+            0.0,
+        )
+        tracking_costs = swing * (
+            self._swing_height_undershoot_cost_weight * jp.square(undershoot)
+            + self._swing_height_overshoot_cost_weight * jp.square(overshoot)
+        )
+
+        excessive_height = jp.maximum(
+            clearance / self._natural_clearance_scale
+            - self._excessive_swing_height_threshold,
+            0.0,
+        )
+        excessive_costs = (
+            self._excessive_swing_height_cost_weight
+            * swing
+            * jp.square(excessive_height)
+        )
+        return tracking_costs, excessive_costs
 
     def _get_foot_slip_cost(
         self,
