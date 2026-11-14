@@ -67,15 +67,15 @@ def default_config() -> config_dict.ConfigDict:
         # episode and independently for each servo unless noted otherwise.
         # The policy sees the command it sent, not the delayed or perturbed
         # command used by the simulation.
-        'servo_response_range': (0.30, 0.55),
-        'servo_center_offset_scale_us': 20.0,
+        'servo_response_range': (0.45, 0.70),
+        'servo_center_offset_scale_us': 30.0,
         'servo_gain_range': (0.90, 1.10),
         # A shared scale captures battery-voltage variation.  It affects all
         # servo speed and torque limits together, while the other ranges retain
         # servo-to-servo variation.
         'servo_voltage_scale_range': (0.85, 1.00),
         'servo_strength_range': (0.85, 1.10),
-        'servo_speed_range': (4.0, 8.0),  # rad/s before voltage scaling.
+        'servo_speed_range': (6.5, 10.5),  # rad/s before voltage scaling.
         # Stiffness scales the XML position-servo kp.  Lower stiffness plus dry
         # joint friction produces load-dependent droop and a breakaway error.
         'servo_stiffness_range': (1, 1),
