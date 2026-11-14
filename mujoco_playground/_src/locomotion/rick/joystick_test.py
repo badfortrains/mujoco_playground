@@ -22,7 +22,6 @@ class JoystickTest(absltest.TestCase):
     self.env._gyro_obs_scale = 0.25
     self.env._target_velocity = 0.04
     self.env._heading_observation = False
-    self.env._foot_sphere_geom_ids = None
 
   def test_default_retraining_config(self):
     config = joystick.default_config()
@@ -35,7 +34,8 @@ class JoystickTest(absltest.TestCase):
     self.assertEqual(config.gyro_bias_calibration_samples, 100)
     self.assertEqual(config.cycle_sideways_velocity_cost_weight, 0.5)
     self.assertEqual(config.cycle_yaw_rate_cost_weight, 4.0)
-    self.assertEqual(tuple(config.action_delay_range), (0, 4))
+    self.assertEqual(tuple(config.servo_response_range), (0.30, 0.55))
+    self.assertEqual(tuple(config.action_delay_range), (0, 2))
     self.assertEqual(tuple(config.foot_friction_range), (0.20, 0.60))
     self.assertEqual(
         tuple(config.center_of_mass_offset_scale),
