@@ -12,6 +12,8 @@ Joint state, root velocity, true heading, foot state, and contact state are used
 for rewards, termination, and diagnostics during training.
 """
 
+from pathlib import Path
+
 import jax
 from jax import numpy as jp
 from ml_collections import config_dict
@@ -41,6 +43,49 @@ _YAW_DISTURBANCE_DEFAULTS = {
 }
 
 
+# Explicit stages advance between runs, after reviewing fixed-command rollouts.
+# Exported ranges include zero because START ramps from rest. The sampling
+# range can exclude near-zero speeds while recovering an actual walking gait.
+def command_stage_overrides(stage: str) -> dict:
+    stages = {
+        'walk': ((0.05, 0.05), (0.0, 0.0), (0.0, 0.0, 1.0, 0.0), False),
+        'speed': ((0.03, 0.06), (0.0, 0.0), (0.0, 0.0, 1.0, 0.0), False),
+        'transitions': ((0.03, 0.06), (0.0, 0.0), (0.15, 0.0, 0.85, 0.0), True),
+        'speed_jumps': ((0.03, 0.06), (0.0, 0.0), (0.0, 0.0, 1.0, 0.0), True),
+        'speed_levels': ((0.03, 0.06), (0.0, 0.0), (0.0, 0.0, 1.0, 0.0), True),
+        'turns': ((0.03, 0.06), (-0.15, 0.15), (0.0, 0.0, 0.50, 0.50), True),
+        'full': ((-0.04, 0.08), (-0.6, 0.6), (0.15, 0.15, 0.30, 0.40), True),
+    }
+    if stage not in stages:
+        raise ValueError(f'Unknown Rick command stage: {stage}')
+    forward, yaw, probabilities, resample = stages[stage]
+    overrides = {
+        'command_stage': stage,
+        'command_forward_velocity_range': forward,
+        'forward_velocity_range': (min(0.0, forward[0]), forward[1]),
+        'yaw_rate_range': yaw,
+        # Order: standing, pivot, straight, combined motion.
+        'command_mode_probabilities': probabilities,
+        'command_resample_in_episode': resample,
+        'command_alternate_speed_endpoints': stage == 'speed_jumps',
+        'command_speed_levels': (0.03, 0.045, 0.06) if stage == 'speed_levels' else (),
+    }
+    if stage in ('speed_jumps', 'speed_levels', 'turns'):
+        overrides.update({
+            'command_resampling_time_range': (4.0, 6.0),
+            'tracking_sigma': 0.0001,  # exp(-1) at 10 mm/s cycle error.
+            'velocity_tracking_weight': 4.0,
+        })
+    return overrides
+
+
+_REWARD_SHAPING_DEFAULTS = {
+    'cycle_velocity_tracking_fraction': 0.75,
+    'instant_velocity_tracking_sigma': 0.0025,
+    'swing_progress_clearance': 0.005,  # Full credit at 5 mm; no gain above it.
+}
+
+
 def default_config() -> config_dict.ConfigDict:
     return config_dict.ConfigDict({
         # Simulation / control.
@@ -57,8 +102,7 @@ def default_config() -> config_dict.ConfigDict:
         # Policy command and gait parameters.
         'target_velocity': 0.050,  # Default deployment speed, m/s.
         'motion_command_version': 1,
-        'forward_velocity_range': (-0.04, 0.08),  # Negative = reverse.
-        'yaw_rate_range': (-0.6, 0.6),  # rad/s; positive = left.
+        **command_stage_overrides('walk'),
         'command_resampling_time_range': (3.0, 6.0),
         'linear_acceleration_limit': 0.05,  # m/s^2.
         'yaw_acceleration_limit': 1.0,  # rad/s^2.
@@ -135,7 +179,8 @@ def default_config() -> config_dict.ConfigDict:
 
         # Task rewards.
         'velocity_tracking_weight': 2.0,
-        'tracking_sigma': 0.0004,  # 0.02 m/s error gives exp(-1).
+        'tracking_sigma': 0.0004,  # Applied to cycle-average speed error.
+        **_REWARD_SHAPING_DEFAULTS,
         'sideways_tracking_sigma': 0.0025,  # Preserve the working sway tolerance.
         'sideways_velocity_cost_weight': 0.02,
         'yaw_rate_cost_weight': 0.4,
@@ -163,7 +208,7 @@ def default_config() -> config_dict.ConfigDict:
         'flight_cost_weight': 1.0,
         'swing_lift_reward_weight': 2.0,
         'swing_airborne_reward_weight': 2.0,
-        'swing_foot_forward_reward_weight': 2.0,
+        'swing_foot_forward_reward_weight': 1.0,
         'foot_slip_cost_weight': 12.0,
         'energy_cost_weight': 0.005,
 
@@ -182,6 +227,7 @@ class Joystick(mjx_env.MjxEnv):
         task: str = "flat_terrain",
         config: config_dict.ConfigDict = default_config(),
         config_overrides: dict = None,
+        xml_path: str | Path | None = None,
     ):
         # Permit explicit overrides when evaluating a pre-disturbance config,
         # but preserve its undisturbed behavior unless explicitly enabled.
@@ -191,10 +237,27 @@ class Joystick(mjx_env.MjxEnv):
                     config[name] = (
                         0.0 if name == 'yaw_disturbance_probability' else value
                     )
+        # Older command-policy configs keep their sampled command distribution
+        # when evaluated with this source. Reward changes still require matching
+        # the saved source snapshot for historical return reproduction.
+        with config.unlocked():
+            additions = {
+                **_REWARD_SHAPING_DEFAULTS,
+                'command_stage': 'custom',
+                'command_forward_velocity_range': config.get('forward_velocity_range', (0.0, config.target_velocity)),
+                'command_mode_probabilities': (0.15, 0.15, 0.30, 0.40),
+                'command_resample_in_episode': True,
+                'command_alternate_speed_endpoints': False,
+                'command_speed_levels': (),
+            }
+            for name, value in additions.items():
+                if name not in config:
+                    config[name] = value
         super().__init__(config, config_overrides)
         self._configure_yaw_disturbance(config)
+        self._configure_reward_shaping(config)
 
-        path = consts.task_to_xml(task)
+        path = Path(xml_path) if xml_path is not None else consts.task_to_xml(task)
         self._xml_path = path.as_posix()
         self._mj_model = mujoco.MjModel.from_xml_path(path.as_posix())
         self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
@@ -447,13 +510,6 @@ class Joystick(mjx_env.MjxEnv):
             self._cycle_weights = jp.ones(self._cycle_window).at[0].set(
                 self._cycle_samples - (self._cycle_window - 1)
             ) / self._cycle_samples
-        default_foot_offsets = (
-            jp.array(default_data.site_xpos)[self._feet_site_ids]
-            - jp.array(default_data.subtree_com[self._body_idx])
-        )
-        self._nominal_foot_forward_positions = (
-            default_foot_offsets @ self._forward_world
-        )
         self._ctrl_min = self._mjx_model.actuator_ctrlrange[:, 0]
         self._ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
         self._actuated_dof_ids = jp.array(
@@ -719,6 +775,9 @@ class Joystick(mjx_env.MjxEnv):
             'target_yaw_rate': motion_command[1],
             'cost_standing': zero,
             'reward_velocity_tracking': zero,
+            'reward_velocity_tracking_instant': zero,
+            'reward_velocity_tracking_cycle': zero,
+            'cycle_forward_velocity_error': zero,
             'reward_foot_phase': zero,
             'reward_swing_lift': zero,
             'reward_swing_airborne': zero,
@@ -805,7 +864,7 @@ class Joystick(mjx_env.MjxEnv):
                 'yaw_disturbance': self._reset_yaw_disturbance(
                     jax.random.fold_in(rng, 241)
                 ),
-                'drift_history': jp.zeros((self._cycle_window, 2)),
+                'drift_history': jp.zeros((self._cycle_window, 3)),
                 'drift_history_count': jp.array(0, dtype=jp.int32),
                 'previous_imu_velocity_world': jp.zeros((3,)),
                 'accelerometer_bias': accelerometer_bias,
@@ -1036,11 +1095,19 @@ class Joystick(mjx_env.MjxEnv):
             velocity_world, body_forward_xy
         )
 
-        velocity_tracking_reward = (
-            self._velocity_tracking_weight
-            * jp.exp(
-                -jp.square(forward_velocity - motion_command[0])
-                / self._tracking_sigma
+        # Store errors against each sample's own command, so changing targets
+        # do not compare past motion with only the most recent target.
+        forward_velocity_error = forward_velocity - motion_command[0]
+        yaw_rate_error = yaw_rate - motion_command[1]
+        drift_history, drift_count, cycle_velocity, cycle_ready = (
+            self._update_cycle_velocity(
+                state.info['drift_history'], state.info['drift_history_count'],
+                jp.array([sideways_velocity, yaw_rate_error, forward_velocity_error]),
+            )
+        )
+        velocity_tracking_reward, instant_tracking_reward, cycle_tracking_reward = (
+            self._get_velocity_tracking_reward(
+                forward_velocity_error, cycle_velocity[2], cycle_ready
             )
         )
         sideways_velocity_cost = (
@@ -1059,6 +1126,9 @@ class Joystick(mjx_env.MjxEnv):
             foot_positions_after - foot_positions_before
         ) / self.dt
 
+        foot_contacts = (
+            data.sensordata[self._foot_contact_sensor_adrs] > 0
+        )
         swing_foot_forward_reward, foot_forward_positions = (
             self._get_swing_foot_forward_reward(
                 foot_positions_after,
@@ -1069,11 +1139,10 @@ class Joystick(mjx_env.MjxEnv):
                 velocity_world,
                 motion_command,
                 yaw_rate,
+                foot_contacts,
+                toe_clearance,
+                heel_clearance,
             )
-        )
-
-        foot_contacts = (
-            data.sensordata[self._foot_contact_sensor_adrs] > 0
         )
         foot_phase_reward, swing_lift_reward, swing_airborne_reward = (
             self._get_foot_height_rewards(
@@ -1103,14 +1172,7 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         # These global quantities shape training but never enter observation.
-        yaw_rate_error = yaw_rate - motion_command[1]
         yaw_rate_cost = self._yaw_rate_cost_weight * jp.square(yaw_rate_error)
-        drift_history, drift_count, cycle_velocity, cycle_ready = (
-            self._update_cycle_velocity(
-                state.info['drift_history'], state.info['drift_history_count'],
-                jp.array([sideways_velocity, yaw_rate_error]),
-            )
-        )
         cycle_sideways_velocity_cost = (
             self._cycle_sideways_velocity_cost_weight
             * jp.square(cycle_velocity[0]) / self._sideways_tracking_sigma
@@ -1245,6 +1307,9 @@ class Joystick(mjx_env.MjxEnv):
             target_yaw_rate=motion_command[1],
             cost_standing=-standing_cost,
             reward_velocity_tracking=velocity_tracking_reward,
+            reward_velocity_tracking_instant=instant_tracking_reward,
+            reward_velocity_tracking_cycle=cycle_tracking_reward,
+            cycle_forward_velocity_error=cycle_velocity[2],
             reward_foot_phase=foot_phase_reward,
             reward_swing_lift=swing_lift_reward,
             reward_swing_airborne=swing_airborne_reward,
@@ -1539,12 +1604,36 @@ class Joystick(mjx_env.MjxEnv):
             center_of_mass_offset
         )
 
+    def _configure_reward_shaping(self, config):
+        for name in ('tracking_sigma', 'instant_velocity_tracking_sigma',
+                     'swing_progress_clearance'):
+            if not np.isfinite(config[name]) or config[name] <= 0:
+                raise ValueError(f'{name} must be positive and finite')
+        fraction = config.cycle_velocity_tracking_fraction
+        if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+            raise ValueError('cycle_velocity_tracking_fraction must be in [0, 1]')
+        self._cycle_velocity_tracking_fraction = fraction
+        self._instant_velocity_tracking_sigma = config.instant_velocity_tracking_sigma
+        self._swing_progress_clearance = config.swing_progress_clearance
+
+    def _get_velocity_tracking_reward(self, error, cycle_error, cycle_ready):
+        # Use only the broad instantaneous term until a full period is recorded.
+        # This avoids granting full cycle credit for zero-filled history.
+        fraction = jp.where(cycle_ready, self._cycle_velocity_tracking_fraction, 0.0)
+        instant = self._velocity_tracking_weight * (1.0 - fraction) * jp.exp(
+            -jp.square(error) / self._instant_velocity_tracking_sigma
+        )
+        cycle = self._velocity_tracking_weight * fraction * jp.exp(
+            -jp.square(cycle_error) / self._tracking_sigma
+        )
+        return instant + cycle, instant, cycle
+
     def _configure_motion_commands(self, config):
         if not config.heading_observation:
             raise ValueError('motion commands require heading_observation=True')
         if config.get('motion_command_version') != 1:
             raise ValueError('Rick command training requires motion_command_version=1; start a new run')
-        for name in ('forward_velocity_range', 'yaw_rate_range',
+        for name in ('forward_velocity_range', 'command_forward_velocity_range', 'yaw_rate_range',
                      'command_resampling_time_range'):
             bounds = np.asarray(config[name], dtype=float)
             if bounds.shape != (2,) or not np.all(np.isfinite(bounds)) or bounds[0] > bounds[1]:
@@ -1554,10 +1643,45 @@ class Joystick(mjx_env.MjxEnv):
         for name in ('linear_acceleration_limit', 'yaw_acceleration_limit'):
             if not np.isfinite(config[name]) or config[name] <= 0:
                 raise ValueError(f'{name} must be positive and finite')
-        self._command_min = jp.array([config.forward_velocity_range[0], config.yaw_rate_range[0]])
-        self._command_max = jp.array([config.forward_velocity_range[1], config.yaw_rate_range[1]])
-        if bool(jp.any(self._command_min > 0) | jp.any(self._command_max < 0)):
+        self._command_min = jp.array([config.command_forward_velocity_range[0], config.yaw_rate_range[0]])
+        self._command_max = jp.array([config.command_forward_velocity_range[1], config.yaw_rate_range[1]])
+        if not (config.forward_velocity_range[0] <= 0 <= config.forward_velocity_range[1]
+                and config.yaw_rate_range[0] <= 0 <= config.yaw_rate_range[1]):
             raise ValueError('motion command ranges must include zero for standing')
+        if not (config.forward_velocity_range[0] <= config.command_forward_velocity_range[0]
+                <= config.command_forward_velocity_range[1] <= config.forward_velocity_range[1]):
+            raise ValueError('sampled forward commands must fit forward_velocity_range')
+        probabilities = np.asarray(config.command_mode_probabilities, dtype=float)
+        if (probabilities.shape != (4,) or not np.all(np.isfinite(probabilities))
+                or np.any(probabilities < 0) or not np.isclose(probabilities.sum(), 1.0)):
+            raise ValueError('command_mode_probabilities must be four nonnegative probabilities summing to one')
+        self._command_mode_thresholds = jp.array(np.cumsum(probabilities))
+        if not isinstance(config.command_resample_in_episode, bool):
+            raise ValueError('command_resample_in_episode must be a boolean')
+        self._command_resample_in_episode = config.command_resample_in_episode
+        alternate = config.get('command_alternate_speed_endpoints', False)
+        if not isinstance(alternate, bool):
+            raise ValueError('command_alternate_speed_endpoints must be a boolean')
+        if alternate and not (
+                config.command_resample_in_episode
+                and 0 < config.command_forward_velocity_range[0] < config.command_forward_velocity_range[1]
+                and tuple(config.yaw_rate_range) == (0.0, 0.0)
+                and np.allclose(probabilities, [0.0, 0.0, 1.0, 0.0])):
+            raise ValueError('Alternating speed endpoints require positive distinct speeds, straight-only modes, zero yaw, and resampling')
+        self._command_alternate_speed_endpoints = alternate
+        levels = np.asarray(config.get('command_speed_levels', ()), dtype=float)
+        if levels.ndim != 1:
+            raise ValueError('command_speed_levels must be a one-dimensional sequence')
+        if levels.size and not (
+                levels.size >= 2 and np.all(np.isfinite(levels))
+                and np.all(levels > 0) and np.all(np.diff(levels) > 0)
+                and config.command_forward_velocity_range[0] <= levels[0]
+                and levels[-1] <= config.command_forward_velocity_range[1]
+                and config.command_resample_in_episode and not alternate
+                and tuple(config.yaw_rate_range) == (0.0, 0.0)
+                and np.allclose(probabilities, [0.0, 0.0, 1.0, 0.0])):
+            raise ValueError('Discrete speed levels require ordered positive distinct speeds in range, straight-only modes, zero yaw, resampling, and no endpoint alternation')
+        self._command_speed_levels = jp.asarray(levels, dtype=jp.float32)
         self._command_time_range = tuple(config.command_resampling_time_range)
         self._command_acceleration = jp.array([
             config.linear_acceleration_limit, config.yaw_acceleration_limit,
@@ -1573,11 +1697,18 @@ class Joystick(mjx_env.MjxEnv):
         command = jax.random.uniform(
             value_key, (2,), minval=self._command_min, maxval=self._command_max
         )
+        if self._command_alternate_speed_endpoints:
+            first_speed = jp.where(jax.random.bernoulli(value_key),
+                                   self._command_max[0], self._command_min[0])
+            command = command.at[0].set(first_speed)
+        if self._command_speed_levels.size:
+            index = jax.random.randint(value_key, (), 0, self._command_speed_levels.size)
+            command = command.at[0].set(self._command_speed_levels[index])
         mode = jax.random.uniform(mode_key)
-        # 15% standing, 15% pivoting, 30% straight, 40% combined motion.
-        command = jp.where(mode < 0.30, command.at[0].set(0.0), command)
-        command = jp.where((mode >= 0.30) & (mode < 0.60), command.at[1].set(0.0), command)
-        command = jp.where(mode < 0.15, jp.zeros(2), command)
+        standing_end, pivot_end, straight_end = self._command_mode_thresholds[:3]
+        command = jp.where(mode < pivot_end, command.at[0].set(0.0), command)
+        command = jp.where((mode >= pivot_end) & (mode < straight_end), command.at[1].set(0.0), command)
+        command = jp.where(mode < standing_end, jp.zeros(2), command)
         duration = jax.random.uniform(time_key, (),
             minval=self._command_time_range[0], maxval=self._command_time_range[1])
         ticks = jp.maximum(jp.ceil(duration / self.dt).astype(jp.int32), 1)
@@ -1585,11 +1716,21 @@ class Joystick(mjx_env.MjxEnv):
 
     def _step_motion_command(self, command, target, ticks, rng):
         sampled_target, sampled_ticks = self._sample_motion_command(rng)
-        target = jp.where(ticks <= 0, sampled_target, target)
-        ticks = jp.where(ticks <= 0, sampled_ticks, ticks)
+        if self._command_alternate_speed_endpoints:
+            midpoint = 0.5 * (self._command_min[0] + self._command_max[0])
+            next_speed = jp.where(target[0] <= midpoint,
+                                  self._command_max[0], self._command_min[0])
+            sampled_target = jp.array([next_speed, 0.0])
+        if self._command_speed_levels.size:
+            index = jp.argmin(jp.abs(self._command_speed_levels - target[0]))
+            next_speed = self._command_speed_levels[(index + 1) % self._command_speed_levels.size]
+            sampled_target = jp.array([next_speed, 0.0])
+        resample = (ticks <= 0) & self._command_resample_in_episode
+        target = jp.where(resample, sampled_target, target)
+        ticks = jp.where(resample, sampled_ticks, ticks)
         limit = self._command_acceleration * self.dt
         command = command + jp.clip(target - command, -limit, limit)
-        return command, target, ticks - 1
+        return command, target, jp.maximum(ticks - 1, 0)
 
     @staticmethod
     def _walking_activity(command):
@@ -1642,7 +1783,7 @@ class Joystick(mjx_env.MjxEnv):
         count = jp.minimum(count + 1, self._cycle_window)
         ready = count == self._cycle_window
         mean = self._cycle_weights @ history
-        return history, count, jp.where(ready, mean, jp.zeros(2)), ready
+        return history, count, jp.where(ready, mean, jp.zeros_like(velocity)), ready
 
     @staticmethod
     def _heading_from_quat(quat: jp.ndarray) -> jp.ndarray:
@@ -1835,6 +1976,9 @@ class Joystick(mjx_env.MjxEnv):
         body_velocity_world: jp.ndarray,
         motion_command: jp.ndarray,
         body_yaw_rate: jp.ndarray,
+        contacts: jp.ndarray,
+        toe_clearance: jp.ndarray,
+        heel_clearance: jp.ndarray,
     ) -> tuple[jp.ndarray, jp.ndarray]:
         foot_offsets_xy = (
             foot_positions_world[:, :2] - body_position_world[:2]
@@ -1843,7 +1987,6 @@ class Joystick(mjx_env.MjxEnv):
         foot_phases = phase + jp.array([0.0, jp.pi])
         phase_sin = jp.sin(foot_phases)
         swing = jp.square(jp.maximum(phase_sin, 0.0))
-        stance = jp.square(jp.minimum(phase_sin, 0.0))
         yaw_tangent = jp.stack(
             [-foot_offsets_xy[:, 1], foot_offsets_xy[:, 0]], axis=1
         )
@@ -1860,22 +2003,13 @@ class Joystick(mjx_env.MjxEnv):
         speed = jp.linalg.norm(desired_velocity, axis=1)
         direction = desired_velocity / jp.maximum(speed[:, None], 1e-3)
         relative_speed = jp.sum(foot_relative_velocity * direction, axis=1)
-        vel_credit = 0.5 * jp.sum(
-            swing * jp.tanh(relative_speed / jp.maximum(2.0 * speed, 1e-3))
-            + stance * jp.tanh(-relative_speed / jp.maximum(speed, 1e-3))
-        )
-        # Placement follows signed forward velocity at each foot, supporting
-        # reverse motion and the asymmetric strides needed while turning.
-        foot_forward_speed = desired_velocity @ body_forward_xy
-        d_half = jp.maximum(jp.abs(foot_forward_speed) / (4.0 * self._step_frequency), 1e-3)
-        foot_rel_forward = foot_forward_positions - self._nominal_foot_forward_positions
-        placement_credit = 0.5 * jp.sum(
-            jp.square(jp.cos(foot_phases)) * jp.tanh(
-                -jp.cos(foot_phases) * foot_rel_forward
-                * jp.sign(foot_forward_speed) / d_half
-            )
-        )
-        reward = self._swing_foot_forward_reward_weight * (
-            vel_credit + placement_credit
-        )
+        # Foot progress earns credit only for a lifted swing foot supported by
+        # the opposite foot. Dense unloading/lift rewards remain independent,
+        # so discovering liftoff does not depend on this contact gate.
+        clearance = jp.minimum(toe_clearance, heel_clearance)
+        height_fraction = jp.clip(clearance / self._swing_progress_clearance, 0.0, 1.0)
+        clearance_credit = jp.square(height_fraction) * (3.0 - 2.0 * height_fraction)
+        supported_swing = swing * (~contacts) * contacts[::-1] * clearance_credit
+        progress = jp.tanh(relative_speed / jp.maximum(2.0 * speed, 1e-3))
+        reward = self._swing_foot_forward_reward_weight * jp.sum(supported_swing * progress)
         return reward, foot_forward_positions

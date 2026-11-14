@@ -12,11 +12,13 @@ class MotionCommandTest(unittest.TestCase):
     def setUp(self):
         self.env = object.__new__(joystick.Joystick)
         self.env._ctrl_dt = .02
-        self.env._configure_motion_commands(joystick.default_config())
+        config = joystick.default_config()
+        config.update(joystick.command_stage_overrides('full'))
+        self.env._configure_motion_commands(config)
+        self.env._configure_reward_shaping(config)
         self.env._heading_observation = True
         self.env._gyro_obs_scale = .25
         self.env._step_frequency = 1.5
-        self.env._nominal_foot_forward_positions = jp.zeros(2)
         self.env._swing_foot_forward_reward_weight = 1.
 
     def test_observation_contract(self):
@@ -75,7 +77,8 @@ class MotionCommandTest(unittest.TestCase):
         def score(command, velocities, yaw=0.):
             return float(self.env._get_swing_foot_forward_reward(
                 feet, jp.zeros(3), jp.array([0., -1.]), phase,
-                velocities, jp.zeros(3), jp.array(command), jp.array(yaw))[0])
+                velocities, jp.zeros(3), jp.array(command), jp.array(yaw),
+                jp.array([False, True]), jp.full(2, .005), jp.full(2, .005))[0])
         forward = jp.array([[0., -.10, 0.], [0., .05, 0.]])
         self.assertGreater(score([.05, 0.], forward), .7)
         self.assertLess(score([-.05, 0.], forward), -.7)
@@ -83,8 +86,8 @@ class MotionCommandTest(unittest.TestCase):
         pivot = jp.array([[0., .025, 0.], [0., .0125, 0.]])
         self.assertGreater(score([0., .5], pivot), .7)
         self.assertLess(score([0., -.5], pivot), -.7)
-        # During a real pivot the stance foot remains planted. Subtracting
-        # measured body rotation gives the correct stance retraction credit.
+        # During a real pivot the stance foot stays planted; only the lifted
+        # swing foot earns progress credit in the rotating body frame.
         pivot_planted = jp.array([[0., .0375, 0.], [0., 0., 0.]])
         self.assertGreater(score([0., .5], pivot_planted, yaw=.5), .7)
         self.assertEqual(score([0., 0.], forward), 0.)
