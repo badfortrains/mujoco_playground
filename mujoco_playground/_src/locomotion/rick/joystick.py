@@ -95,8 +95,8 @@ def default_config() -> config_dict.ConfigDict:
         # Residual whole-robot COM uncertainty.  Battery placement and mass
         # have separate, physically targeted randomization below.
         'center_of_mass_offset_scale': (0.002, 0.002, 0.001),  # m.
-        'battery_position_offset_scale': (0.007, 0.007, 0.007),  # m.
-        'battery_mass_scale_range': (0.90, 1.10),
+        'battery_position_offset_scale': (0.005, 0.004, 0.000),  # m.
+        'battery_mass_scale_range': (1.0, 1.0),
 
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
