@@ -54,7 +54,7 @@ def default_config() -> config_dict.ConfigDict:
         'njmax': 96,
 
         # Policy command and gait parameters.
-        'target_velocity': 0.050,
+        'target_velocity': 0.040,
         'action_scale': 0.50,
         'step_frequency': 1.5,
         'auto_step_frequency': True,
