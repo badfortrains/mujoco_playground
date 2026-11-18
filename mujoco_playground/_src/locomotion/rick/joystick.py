@@ -68,7 +68,7 @@ def default_config() -> config_dict.ConfigDict:
         # The policy sees the command it sent, not the delayed or perturbed
         # command used by the simulation.
         'servo_response_range': (0.45, 0.70),
-        'servo_center_offset_scale_us': 10.0,
+        'servo_center_offset_scale_us': 13.0,
         'servo_gain_range': (0.95, 1.05),
         # A shared scale captures battery-voltage variation.  It affects all
         # servo speed and torque limits together, while the other ranges retain
@@ -78,7 +78,7 @@ def default_config() -> config_dict.ConfigDict:
         'servo_speed_range': (6.5, 10.5),  # rad/s before voltage scaling.
         # Stiffness scales the XML position-servo kp.  Lower stiffness plus dry
         # joint friction produces load-dependent droop and a breakaway error.
-        'servo_stiffness_range': (1, 1),
+        'servo_stiffness_range': (0.8, 1),
         'servo_frictionloss_range': (0.010, 0.025),  # N m.
         # Command deadband is electronic; backlash is a stateful half-width at
         # the output.  A reversal traverses twice the sampled backlash value.
@@ -101,7 +101,7 @@ def default_config() -> config_dict.ConfigDict:
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
         'root_position_noise_scale': (0.002, 0.002, 0.0007),  # m.
-        'root_tilt_noise_scale': 0.05,  # rad
+        'root_tilt_noise_scale': 0.08,  # rad
         'joint_position_noise_scale': 0.03,  # rad.
         'root_linear_velocity_noise_scale': 0.02,  # m/s.
         'root_angular_velocity_noise_scale': 0.10,  # rad/s.
