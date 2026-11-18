@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from unittest import mock
+import xml.etree.ElementTree as ET
 
 from etils import epath
 import jax
@@ -159,6 +160,7 @@ class CapsuleCollisionTest(unittest.TestCase):
     self.addCleanup(directory.cleanup)
     path = epath.Path(directory.name) / 'capsule_feet.xml'
     path.write_text(xml)
+    self._xml_path = path
     with mock.patch.object(rick_constants, 'task_to_xml', return_value=path):
       self.env = joystick.Joystick()
 
@@ -192,6 +194,42 @@ class CapsuleCollisionTest(unittest.TestCase):
     self.assertGreater(float(heel[0]), 0.002)
     np.testing.assert_allclose(toe[1], 0.0, atol=1e-6)
     np.testing.assert_allclose(heel[1], 0.0, atol=1e-6)
+
+  def test_front_caps_join_contact_friction_and_clearance(self):
+    tree = ET.parse(self._xml_path.as_posix())
+    root = tree.getroot()
+    for side in ('left', 'right'):
+      body = root.find(f".//body[@name='{side}']")
+      for index, x in enumerate((-.006, .006), start=1):
+        name = f'{side}_foot_front_{index}'
+        ET.SubElement(body, 'geom', {
+            'name': name, 'type': 'sphere', 'pos': f'{x} -.03 -.006',
+            'size': '.014', 'density': '0', 'contype': '1',
+            'conaffinity': '1',
+        })
+        ET.SubElement(root.find('contact'), 'pair', {
+            'name': f'{side}_foot_front_floor_{index}',
+            'geom1': name, 'geom2': 'floor', 'friction': '.35 .35',
+        })
+    front_path = self._xml_path.parent / 'front_cap_feet.xml'
+    tree.write(front_path.as_posix())
+    with mock.patch.object(rick_constants, 'task_to_xml', return_value=front_path):
+      env = joystick.Joystick()
+
+    self.assertEqual(np.asarray(env._foot_front_geom_ids).shape, (2, 2))
+    np.testing.assert_array_equal(np.sort(env._foot_floor_pair_ids), np.arange(8))
+    self.assertEqual(env._foot_contact_sensor_adrs.shape, (2, 4))
+    data = mujoco.MjData(env.mj_model)
+    data.qpos[:] = env._default_qpos
+    data.qpos[2] -= .01
+    mujoco.mj_forward(env.mj_model, data)
+    contacts = np.asarray(data.sensordata)[
+        np.asarray(env._foot_contact_sensor_adrs)
+    ] > 0
+    np.testing.assert_array_equal(contacts, np.ones((2, 4), dtype=bool))
+    toe, heel = env._get_foot_clearances(mjx.put_data(env.mj_model, data))
+    np.testing.assert_allclose(toe, -.01, atol=1e-6)
+    np.testing.assert_allclose(heel, -.01, atol=1e-6)
 
 
 if __name__ == '__main__':

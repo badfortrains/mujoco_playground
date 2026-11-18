@@ -23,6 +23,10 @@ def ensure_rick_assets():
         )
 
 def task_to_xml(task_name: str) -> epath.Path:
+    # Train against the editable sibling checkout when it is available.
+    local_xml = ROOT_PATH.parents[4] / "rick_v2" / "RoboVert_Copy_v27.xml"
+    if local_xml.exists():
+        return local_xml
     ensure_rick_assets()
     xml_path = ROOT_PATH / "xmls" / "rick_v2" / "RoboVert_Copy_v27.xml"
     return xml_path
