@@ -83,9 +83,9 @@ def default_config() -> config_dict.ConfigDict:
         # Command deadband is electronic; backlash is a stateful half-width at
         # the output.  A reversal traverses twice the sampled backlash value.
         'servo_deadband_range_us': (4.0, 12.0),
-        'servo_backlash_range_us': (5.0, 10.0),
+        'servo_backlash_range_us': (5.0, 15.0),
         'action_delay_range': (0, 1),  # Controller frames, inclusive.
-        'action_noise_scale': 0.003,
+        'action_noise_scale': 0.005,
 
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
@@ -101,7 +101,7 @@ def default_config() -> config_dict.ConfigDict:
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
         'root_position_noise_scale': (0.002, 0.002, 0.0007),  # m.
-        'root_tilt_noise_scale': 0.03,  # rad
+        'root_tilt_noise_scale': 0.05,  # rad
         'joint_position_noise_scale': 0.03,  # rad.
         'root_linear_velocity_noise_scale': 0.02,  # m/s.
         'root_angular_velocity_noise_scale': 0.10,  # rad/s.
