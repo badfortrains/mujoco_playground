@@ -68,8 +68,8 @@ def default_config() -> config_dict.ConfigDict:
         # The policy sees the command it sent, not the delayed or perturbed
         # command used by the simulation.
         'servo_response_range': (0.45, 0.70),
-        'servo_center_offset_scale_us': 30.0,
-        'servo_gain_range': (0.90, 1.10),
+        'servo_center_offset_scale_us': 10.0,
+        'servo_gain_range': (0.95, 1.05),
         # A shared scale captures battery-voltage variation.  It affects all
         # servo speed and torque limits together, while the other ranges retain
         # servo-to-servo variation.
@@ -83,14 +83,14 @@ def default_config() -> config_dict.ConfigDict:
         # Command deadband is electronic; backlash is a stateful half-width at
         # the output.  A reversal traverses twice the sampled backlash value.
         'servo_deadband_range_us': (4.0, 12.0),
-        'servo_backlash_range_us': (5.0, 20.0),
-        'action_delay_range': (0, 2),  # Controller frames, inclusive.
-        'action_noise_scale': 0.01,
+        'servo_backlash_range_us': (5.0, 10.0),
+        'action_delay_range': (0, 1),  # Controller frames, inclusive.
+        'action_noise_scale': 0.003,
 
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
         # XML contact coefficient or on a single floor material.
-        'foot_friction_range': (0.20, 0.60),
+        'foot_friction_range': (0.32, 0.37),
 
         # Residual whole-robot COM uncertainty.  Battery placement and mass
         # have separate, physically targeted randomization below.
@@ -101,7 +101,7 @@ def default_config() -> config_dict.ConfigDict:
         # Reset randomization.  Keep units separate: a single scale applied to
         # the free joint, quaternion, and leg joints is not physically useful.
         'root_position_noise_scale': (0.002, 0.002, 0.0007),  # m.
-        'root_tilt_noise_scale': 0.08,  # rad
+        'root_tilt_noise_scale': 0.03,  # rad
         'joint_position_noise_scale': 0.03,  # rad.
         'root_linear_velocity_noise_scale': 0.02,  # m/s.
         'root_angular_velocity_noise_scale': 0.10,  # rad/s.
