@@ -134,7 +134,7 @@ def default_config() -> config_dict.ConfigDict:
         'cycle_sideways_velocity_cost_weight': 2.0,
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 3.0,
-        'orientation_cost_weight': 1.2,
+        'orientation_cost_weight': 2,
         'roll_pitch_rate_cost_weight': 0.02,
         'action_rate_cost_weight': 0.03,
         'action_acceleration_cost_weight': 0.01,
