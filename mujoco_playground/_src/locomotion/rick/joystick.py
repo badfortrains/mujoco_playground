@@ -231,18 +231,7 @@ class Joystick(mjx_env.MjxEnv):
         if side_suffixes['left'] != side_suffixes['right']:
             raise ValueError('Rick feet must use matching collision geometry')
         foot_collision_suffixes = side_suffixes['left']
-        front_cap_names = [
-            [f'{side}_foot_front{suffix}' for suffix in foot_collision_suffixes]
-            for side in ('left', 'right')
-        ]
-        front_caps_present = [name in geom_names for side in front_cap_names
-                              for name in side]
-        if any(front_caps_present) and not all(front_caps_present):
-            raise ValueError('Rick front caps must match every foot capsule')
-        has_front_caps = bool(front_caps_present) and all(front_caps_present)
         has_indexed_foot_geoms = foot_collision_suffixes != ('',)
-        if has_front_caps and not has_indexed_foot_geoms:
-            raise ValueError('Rick front caps require indexed foot capsules')
         if has_indexed_foot_geoms:
             # MJX JAX does not support body-matched contact sensors. Expand
             # each foot sensor into geom-matched sensors on both backends.
@@ -263,17 +252,6 @@ class Joystick(mjx_env.MjxEnv):
                         refname='floor',
                         intprm=[1, 1, 1],  # found, mindist, one slot.
                     )
-                if has_front_caps:
-                    for suffix in foot_collision_suffixes:
-                        spec.add_sensor(
-                            name=f'{side}_foot_front_floor_found{suffix}',
-                            type=mujoco.mjtSensor.mjSENS_CONTACT,
-                            objtype=mujoco.mjtObj.mjOBJ_GEOM,
-                            objname=f'{side}_foot_front{suffix}',
-                            reftype=mujoco.mjtObj.mjOBJ_GEOM,
-                            refname='floor',
-                            intprm=[1, 1, 1],
-                        )
         self._mj_model = spec.compile()
         self._mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
         self._mj_model.opt.iterations = 10
@@ -481,11 +459,9 @@ class Joystick(mjx_env.MjxEnv):
         ])
         # Indexed collision geoms replace the single mesh/box sole in newer
         # XMLs. Four spheres are ordered toe then heel; longitudinal capsules
-        # each span the full toe-to-heel length. Optional front caps extend
-        # the toe collision surface without changing the capsules.
+        # each span the full toe-to-heel length.
         self._foot_sphere_geom_ids = None
         self._foot_capsule_geom_ids = None
-        self._foot_front_geom_ids = None
         if has_indexed_foot_geoms:
             collision_ids = np.array([
                 [self._mj_model.geom(f'{side}_foot_collision{suffix}').id
@@ -515,45 +491,16 @@ class Joystick(mjx_env.MjxEnv):
                     'Rick indexed foot collisions must be all spheres or all '
                     'capsules'
                 )
-        if has_front_caps:
-            if self._foot_capsule_geom_ids is None:
-                raise ValueError('Rick front caps require capsule feet')
-            front_ids = np.array([
-                [self._mj_model.geom(name).id for name in side]
-                for side in front_cap_names
-            ])
-            if not np.all(
-                self._mj_model.geom_type[front_ids]
-                == mujoco.mjtGeom.mjGEOM_SPHERE
-            ):
-                raise ValueError('Rick front caps must be spheres')
-            self._foot_front_geom_ids = jp.array(front_ids)
-            self._foot_front_radii = jp.array(
-                self._mj_model.geom_size[front_ids, 0]
-            )
-        pair_ids = [
+        self._foot_floor_pair_ids = jp.array([
             self._mj_model.pair(f'{side}_foot_floor{suffix}').id
             for side in ('left', 'right')
             for suffix in foot_collision_suffixes
-        ]
-        if has_front_caps:
-            pair_ids.extend(
-                self._mj_model.pair(
-                    f'{side}_foot_front_floor{suffix}'
-                ).id
-                for side in ('left', 'right')
-                for suffix in foot_collision_suffixes
-            )
-        self._foot_floor_pair_ids = jp.array(pair_ids)
+        ])
         self._foot_contact_sensor_adrs = jp.array(
             [
                 [self._mj_model.sensor(
                     f'{side}_foot_floor_found{suffix}'
                 ).adr[0] for suffix in foot_collision_suffixes]
-                + ([self._mj_model.sensor(
-                    f'{side}_foot_front_floor_found{suffix}'
-                ).adr[0] for suffix in foot_collision_suffixes]
-                   if has_front_caps else [])
                 for side in ('left', 'right')
             ]
         )
@@ -1659,14 +1606,6 @@ class Joystick(mjx_env.MjxEnv):
                 + self._foot_capsule_toe_axis_signs * endpoint_offset_z
                 - self._foot_capsule_radii
             )
-            if self._foot_front_geom_ids is not None:
-                front_heights = (
-                    data.geom_xpos[self._foot_front_geom_ids, 2]
-                    - self._foot_front_radii
-                )
-                toe_heights = jp.concatenate(
-                    (toe_heights, front_heights), axis=1
-                )
             heel_heights = (
                 data.geom_xpos[self._foot_capsule_geom_ids, 2]
                 - self._foot_capsule_toe_axis_signs * endpoint_offset_z
