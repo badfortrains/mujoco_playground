@@ -150,6 +150,7 @@ def default_config() -> config_dict.ConfigDict:
         'foot_phase_reward_weight': 5.0,
         'stance_foot_height_cost_weight': 0.5,
         'swing_sole_tilt_cost_weight': 0.5,
+        'swing_toe_down_cost_weight': 1.0,
         'contact_phase_cost_weight': 1.0,
         'flight_cost_weight': 1.0,
         'swing_lift_reward_weight': 2.0,
@@ -414,6 +415,9 @@ class Joystick(mjx_env.MjxEnv):
         )
         self._swing_sole_tilt_cost_weight = (
             config.swing_sole_tilt_cost_weight
+        )
+        self._swing_toe_down_cost_weight = float(
+            config.get('swing_toe_down_cost_weight', 0.0)
         )
         self._contact_phase_cost_weight = config.contact_phase_cost_weight
         self._flight_cost_weight = config.flight_cost_weight
@@ -1711,6 +1715,10 @@ class Joystick(mjx_env.MjxEnv):
         sole_tilt = jp.abs(toe_clearance - heel_clearance) / c0
         foot_phase_reward -= self._swing_sole_tilt_cost_weight * jp.sum(
             swing * jp.tanh(sole_tilt)
+        )
+        toe_down_tilt = jp.maximum(heel_clearance - toe_clearance, 0.0) / c0
+        foot_phase_reward -= self._swing_toe_down_cost_weight * jp.sum(
+            swing * jp.tanh(toe_down_tilt)
         )
         foot_phase_reward -= self._flight_cost_weight * (~jp.any(contacts))
 
