@@ -128,6 +128,7 @@ def default_config() -> config_dict.ConfigDict:
         # Task rewards.
         'velocity_tracking_weight': 2.0,
         'tracking_sigma': 0.0025,
+        'overspeed_tracking_sigma': 0.0004,
         'sideways_velocity_cost_weight': 0.02,
         'yaw_rate_cost_weight': 0.4,
         # Average a full gait period BEFORE squaring: alternating sway cancels.
@@ -340,6 +341,9 @@ class Joystick(mjx_env.MjxEnv):
 
         self._velocity_tracking_weight = config.velocity_tracking_weight
         self._tracking_sigma = config.tracking_sigma
+        self._overspeed_tracking_sigma = float(
+            config.get('overspeed_tracking_sigma', config.tracking_sigma)
+        )
         self._sideways_velocity_cost_weight = (
             config.sideways_velocity_cost_weight
         )
@@ -1163,11 +1167,17 @@ class Joystick(mjx_env.MjxEnv):
         forward_velocity = -velocity_world[1]
         sideways_velocity = velocity_world[0]
 
+        velocity_error = forward_velocity - self._target_velocity
+        velocity_sigma = jp.where(
+            velocity_error > 0.0,
+            self._overspeed_tracking_sigma,
+            self._tracking_sigma,
+        )
         velocity_tracking_reward = (
             self._velocity_tracking_weight
             * jp.exp(
-                -jp.square(forward_velocity - self._target_velocity)
-                / self._tracking_sigma
+                -jp.square(velocity_error)
+                / velocity_sigma
             )
         )
         sideways_velocity_cost = (
@@ -1655,9 +1665,12 @@ class Joystick(mjx_env.MjxEnv):
         foot_phase_reward -= self._swing_sole_tilt_cost_weight * jp.sum(
             swing * jp.tanh(sole_tilt)
         )
+        # Weight by sin(phase) rather than sin^2(phase) and avoid tanh
+        # saturation so early-swing liftoff cannot plantarflex the toe down.
+        swing_window = jp.maximum(phase_sin, 0.0)
         toe_down_tilt = jp.maximum(heel_clearance - toe_clearance, 0.0) / c0
         foot_phase_reward -= self._swing_toe_down_cost_weight * jp.sum(
-            swing * jp.tanh(toe_down_tilt)
+            swing_window * toe_down_tilt
         )
         foot_phase_reward -= self._flight_cost_weight * (~jp.any(contacts))
 
@@ -2037,14 +2050,13 @@ class Joystick(mjx_env.MjxEnv):
             + stance * jp.tanh(-foot_rel_forward_velocity / v_target)
         )
         # Each foot must independently trail the COM at liftoff (-cos < 0)
-        # and lead the COM at touchdown (-cos > 0).
+        # and lead the COM at touchdown (-cos > 0). Measure directly relative
+        # to the COM rather than the backward-shifted keyframe foot offset so
+        # touchdown lands well ahead of the COM.
         d_half = jp.maximum(0.5 * self._kinematic_step_distance, 1e-3)
-        foot_rel_forward = (
-            foot_forward_positions - self._nominal_foot_forward_positions
-        )
         placement_credit = 0.5 * jp.sum(
             jp.square(jp.cos(foot_phases))
-            * jp.tanh(-jp.cos(foot_phases) * foot_rel_forward / d_half)
+            * jp.tanh(-jp.cos(foot_phases) * foot_forward_positions / d_half)
         )
         reward = self._swing_foot_forward_reward_weight * (
             vel_credit + placement_credit
