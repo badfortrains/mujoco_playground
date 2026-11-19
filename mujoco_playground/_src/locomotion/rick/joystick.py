@@ -90,7 +90,7 @@ def default_config() -> config_dict.ConfigDict:
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
         # XML contact coefficient or on a single floor material.
-        'foot_friction_range': (0.5, 0.8),
+        'foot_friction_range': (0.6, 0.8),
 
         # Residual whole-robot COM uncertainty.  Battery placement and mass
         # have separate, physically targeted randomization below.
@@ -134,7 +134,7 @@ def default_config() -> config_dict.ConfigDict:
         'cycle_sideways_velocity_cost_weight': 2.0,
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 3.0,
-        'orientation_cost_weight': 2,
+        'orientation_cost_weight': 1.2,
         'roll_pitch_rate_cost_weight': 0.02,
         'action_rate_cost_weight': 0.03,
         'action_acceleration_cost_weight': 0.01,
@@ -159,7 +159,7 @@ def default_config() -> config_dict.ConfigDict:
         # weaker foot is encouraged to lift; overshoot gets a 25% clearance
         # margin before it is penalized.  A separate cap catches unusually
         # high steps regardless of where they occur in the swing.
-        'swing_height_undershoot_cost_weight': 1.5,
+        'swing_height_undershoot_cost_weight': 0.5,
         'swing_height_overshoot_cost_weight': 0.25,
         'swing_height_overshoot_tolerance': 0.25,
         'excessive_swing_height_cost_weight': 1.0,
