@@ -68,7 +68,7 @@ def default_config() -> config_dict.ConfigDict:
         # The policy sees the command it sent, not the delayed or perturbed
         # command used by the simulation.
         'servo_response_range': (0.45, 0.70),
-        'servo_center_offset_scale_us': 13.0,
+        'servo_center_offset_scale_us': 20.0,
         'servo_gain_range': (0.95, 1.05),
         # A shared scale captures battery-voltage variation.  It affects all
         # servo speed and torque limits together, while the other ranges retain
@@ -90,7 +90,7 @@ def default_config() -> config_dict.ConfigDict:
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
         # XML contact coefficient or on a single floor material.
-        'foot_friction_range': (0.5, 0.8),
+        'foot_friction_range': (0.4, 0.8),
 
         # Residual whole-robot COM uncertainty.  Battery placement and mass
         # have separate, physically targeted randomization below.
