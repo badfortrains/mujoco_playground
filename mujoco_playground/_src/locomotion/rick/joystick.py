@@ -90,7 +90,7 @@ def default_config() -> config_dict.ConfigDict:
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
         # XML contact coefficient or on a single floor material.
-        'foot_friction_range': (0.5, 0.8),
+        'foot_friction_range': (0.4, 0.8),
 
         # Residual whole-robot COM uncertainty.  Battery placement and mass
         # have separate, physically targeted randomization below.
