@@ -68,7 +68,7 @@ def default_config() -> config_dict.ConfigDict:
         # The policy sees the command it sent, not the delayed or perturbed
         # command used by the simulation.
         'servo_response_range': (0.45, 0.70),
-        'servo_center_offset_scale_us': 15.0,
+        'servo_center_offset_scale_us': 10.0,
         'servo_gain_range': (0.95, 1.05),
         # A shared scale captures battery-voltage variation.  It affects all
         # servo speed and torque limits together, while the other ranges retain
