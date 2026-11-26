@@ -771,6 +771,29 @@ class JoystickTest(absltest.TestCase):
     np.testing.assert_allclose(gravity, jp.array([0.0, 0.0, -1.0]))
     np.testing.assert_allclose(gyro, jp.array([2.0, -1.0, 3.0]))
 
+  def test_pose_cost_weights_stance_more_than_swing_and_vanishes_at_nominal(self):
+    self.env._pose_cost_weight = 1.5
+    self.env._actuated_qpos_ids = jp.arange(7, 15, dtype=jp.int32)
+    self.env._nominal_joint_qpos = jp.array(
+        [-0.03, -0.29, 0.58, -0.29, 0.03, 0.29, -0.58, 0.29]
+    )
+    # Right leg actuators first (foot index 1), then left leg (foot index 0).
+    self.env._actuator_foot_indices = jp.array([1, 1, 1, 1, 0, 0, 0, 0])
+    cost = jax.jit(self.env._get_pose_cost)
+
+    nominal_qpos = jp.concatenate([jp.zeros(7), self.env._nominal_joint_qpos])
+    for phase in (-jp.pi / 2, 0.0, jp.pi / 2, jp.pi):
+      self.assertAlmostEqual(float(cost(nominal_qpos, jp.array(phase))), 0.0, places=7)
+
+    # At phase = +pi/2, left (0) is in mid-swing (weight 0.25) and right (1)
+    # is in mid-stance (weight 1.0).
+    left_perturbed = nominal_qpos.at[13].add(0.2)
+    right_perturbed = nominal_qpos.at[9].add(0.2)
+    self.assertAlmostEqual(float(cost(left_perturbed, jp.array(jp.pi / 2))), 0.015, places=6)
+    self.assertAlmostEqual(float(cost(left_perturbed, jp.array(-jp.pi / 2))), 0.060, places=6)
+    self.assertAlmostEqual(float(cost(right_perturbed, jp.array(jp.pi / 2))), 0.060, places=6)
+    self.assertAlmostEqual(float(cost(right_perturbed, jp.array(-jp.pi / 2))), 0.015, places=6)
+
 
 if __name__ == '__main__':
   absltest.main()

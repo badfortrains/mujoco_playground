@@ -68,7 +68,7 @@ def default_config() -> config_dict.ConfigDict:
         # The policy sees the command it sent, not the delayed or perturbed
         # command used by the simulation.
         'servo_response_range': (0.45, 0.70),
-        'servo_center_offset_scale_us': 10.0,
+        'servo_center_offset_scale_us': 20.0,
         'servo_gain_range': (0.95, 1.05),
         # A shared scale captures battery-voltage variation.  It affects all
         # servo speed and torque limits together, while the other ranges retain
@@ -90,11 +90,12 @@ def default_config() -> config_dict.ConfigDict:
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
         # XML contact coefficient or on a single floor material.
-        'foot_friction_range': (0.4, 0.8),
+        'foot_friction_range': (0.25, 1),
 
-        # Residual whole-robot COM uncertainty.  Battery placement and mass
-        # have separate, physically targeted randomization below.
-        'center_of_mass_offset_scale': (0.002, 0.002, 0.001),  # m.
+        # Residual whole-robot COM uncertainty (battery_1 is <10% of total mass,
+        # so its own offset only shifts whole-robot COM by ~0.4 mm).  Battery
+        # placement and mass have separate randomization below.
+        'center_of_mass_offset_scale': (0.005, 0.005, 0.002),  # m.
         'battery_position_offset_scale': (0.005, 0.004, 0.000),  # m.
         'battery_mass_scale_range': (1.0, 1.0),
 
@@ -134,7 +135,8 @@ def default_config() -> config_dict.ConfigDict:
         'cycle_sideways_velocity_cost_weight': 2.0,
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 3.0,
-        'orientation_cost_weight': 1.2,
+        'orientation_cost_weight': 5.0,
+        'pose_cost_weight': 1.5,
         'roll_pitch_rate_cost_weight': 0.02,
         'action_rate_cost_weight': 0.03,
         'action_acceleration_cost_weight': 0.01,
@@ -171,7 +173,7 @@ def default_config() -> config_dict.ConfigDict:
         # Termination.
         'terminate_when_unhealthy': True,
         'healthy_z_range': (0.034, 0.20),
-        'minimum_upright': 0.70,
+        'minimum_upright': 0.90,
     })
 
 
@@ -368,6 +370,7 @@ class Joystick(mjx_env.MjxEnv):
             self._cycle_samples - (self._cycle_window - 1)
         ) / self._cycle_samples
         self._orientation_cost_weight = config.orientation_cost_weight
+        self._pose_cost_weight = config.get('pose_cost_weight', 0.0)
         self._roll_pitch_rate_cost_weight = (
             config.roll_pitch_rate_cost_weight
         )
@@ -584,6 +587,33 @@ class Joystick(mjx_env.MjxEnv):
         self._ctrl_max = self._mjx_model.actuator_ctrlrange[:, 1]
         self._actuated_dof_ids = jp.array(
             self._mj_model.jnt_dofadr[actuator_joint_ids]
+        )
+        self._actuated_qpos_ids = jp.array(
+            self._mj_model.jnt_qposadr[actuator_joint_ids]
+        )
+        self._nominal_joint_qpos = self._default_qpos[self._actuated_qpos_ids]
+
+        def _leg_ancestor_bodies(site_id: int) -> set[int]:
+            bodies = set()
+            body_id = int(self._mj_model.site_bodyid[site_id])
+            while body_id > 0 and body_id != self._body_idx:
+                bodies.add(body_id)
+                body_id = int(self._mj_model.body_parentid[body_id])
+            return bodies
+
+        left_leg_bodies = _leg_ancestor_bodies(int(self._feet_site_ids[0]))
+        right_leg_bodies = _leg_ancestor_bodies(int(self._feet_site_ids[1]))
+        joint_foot_indices = []
+        for joint_id in actuator_joint_ids:
+            body_id = int(self._mj_model.jnt_bodyid[joint_id])
+            if body_id in left_leg_bodies:
+                joint_foot_indices.append(0)
+            elif body_id in right_leg_bodies:
+                joint_foot_indices.append(1)
+            else:
+                joint_foot_indices.append(-1)
+        self._actuator_foot_indices = jp.array(
+            joint_foot_indices, dtype=jp.int32
         )
 
     @property
@@ -873,6 +903,7 @@ class Joystick(mjx_env.MjxEnv):
             'estimated_heading_error': zero,
             'cost_heading': zero,
             'cost_orientation': zero,
+            'cost_pose': zero,
             'cost_roll_pitch_rate': zero,
             'cost_action_rate': zero,
             'cost_action_acceleration': zero,
@@ -1260,6 +1291,7 @@ class Joystick(mjx_env.MjxEnv):
             self._orientation_cost_weight
             * jp.sum(jp.square(gravity_local[:2]))
         )
+        pose_cost = self._get_pose_cost(data.qpos, phase)
         vertical_velocity_cost = (
             self._vertical_velocity_cost_weight
             * jp.square(velocity_world[2])
@@ -1298,6 +1330,7 @@ class Joystick(mjx_env.MjxEnv):
             - cycle_yaw_rate_cost
             - heading_cost
             - tilt_cost
+            - pose_cost
             - roll_pitch_rate_cost
             - action_rate_cost
             - action_acceleration_cost
@@ -1384,6 +1417,7 @@ class Joystick(mjx_env.MjxEnv):
             estimated_heading_error=heading_error,
             cost_heading=-heading_cost,
             cost_orientation=-tilt_cost,
+            cost_pose=-pose_cost,
             cost_roll_pitch_rate=-roll_pitch_rate_cost,
             cost_action_rate=-action_rate_cost,
             cost_action_acceleration=-action_acceleration_cost,
@@ -1732,6 +1766,27 @@ class Joystick(mjx_env.MjxEnv):
         return self._foot_slip_cost_weight * jp.sum(
             (contacts + 0.5 * swing * (1.0 - contacts) * near_ground)
             * tangential_speed_squared
+        )
+
+    def _get_pose_cost(
+        self,
+        qpos: jp.ndarray,
+        phase: jp.ndarray,
+    ) -> jp.ndarray:
+        """Anchors stance joints near the knees-forward keyframe pose."""
+        foot_phases = phase + jp.array([0.0, jp.pi])
+        stance = jp.square(jp.minimum(jp.sin(foot_phases), 0.0))
+        leg_weights = 0.25 + 0.75 * stance
+        joint_weights = jp.where(
+            self._actuator_foot_indices >= 0,
+            leg_weights[jp.maximum(self._actuator_foot_indices, 0)],
+            1.0,
+        )
+        joint_error = (
+            qpos[self._actuated_qpos_ids] - self._nominal_joint_qpos
+        )
+        return self._pose_cost_weight * jp.sum(
+            joint_weights * jp.square(joint_error)
         )
 
     def _body_ipos_with_com_offset(
