@@ -838,6 +838,81 @@ class JoystickTest(absltest.TestCase):
     r_high = reward(jp.array(jp.pi / 2), jp.array([False, False]), stance_high, stance_high)[0]
     self.assertLess(float(r_high), float(r_low))
 
+  def test_sole_flatness_cost_penalizes_roll_and_pitch_more_in_stance(self):
+    self.env._feet_site_ids = jp.array([0, 1], dtype=jp.int32)
+    self.env._sole_flatness_cost_weight = 4.0
+    cost = jax.jit(self.env._get_sole_flatness_cost)
+
+    flat = jp.stack([jp.eye(3), jp.eye(3)])
+    self.assertAlmostEqual(
+        float(cost(flat, jp.array(jp.pi / 2), jp.array([False, True]))),
+        0.0,
+        places=7,
+    )
+
+    angle = 0.25
+    c, s = jp.cos(angle), jp.sin(angle)
+    rolled = jp.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+    left_tilted = jp.stack([rolled, jp.eye(3)])
+    # At phase = +pi/2, left is in mid-swing (weight 0.3) when airborne, and
+    # weight 1.0 in mid-stance (-pi/2) or when in contact.
+    swing_cost = float(
+        cost(left_tilted, jp.array(jp.pi / 2), jp.array([False, True]))
+    )
+    stance_cost = float(
+        cost(left_tilted, jp.array(-jp.pi / 2), jp.array([False, True]))
+    )
+    contact_cost = float(
+        cost(left_tilted, jp.array(jp.pi / 2), jp.array([True, True]))
+    )
+    self.assertAlmostEqual(swing_cost, 4.0 * 0.3 * float(s * s), places=6)
+    self.assertAlmostEqual(stance_cost, 4.0 * 1.0 * float(s * s), places=6)
+    self.assertAlmostEqual(contact_cost, stance_cost, places=6)
+
+  def test_transition_slip_and_centered_foot_placement(self):
+    self.env._natural_clearance_scale = 0.008
+    self.env._foot_slip_cost_weight = 16.0
+    self.env._slip_cost_includes_transitions = True
+    slip_cost = jax.jit(self.env._get_foot_slip_cost)
+    vel = jp.array([[0.10, 0.0, 0.05], [0.0, 0.0, 0.0]])
+    z = jp.zeros(2)
+    # Liftoff transition (True -> False) at phase = 0 is penalized when sliding.
+    c_liftoff = float(
+        slip_cost(
+            vel, jp.array([True, True]), jp.array([False, True]),
+            jp.array(0.0), z, z,
+        )
+    )
+    self.assertAlmostEqual(c_liftoff, 16.0 * 0.01, places=6)
+
+    self.env._target_velocity = 0.04
+    self.env._kinematic_step_distance = 0.0145
+    self.env._nominal_foot_forward_positions = jp.zeros(2)
+    self.env._swing_foot_forward_reward_weight = 1.5
+    self.env._center_foot_placement = True
+    fwd_reward = jax.jit(self.env._get_swing_foot_forward_reward)
+    forward_xy = jp.array([0.0, -1.0])
+    zero_v = jp.zeros(3)
+    zero_fv = jp.zeros((2, 3))
+    # Standstill at nominal positions gives zero reward.
+    r_zero, _ = fwd_reward(
+        jp.zeros((2, 3)), zero_v, forward_xy, jp.array(0.0), zero_fv, zero_v
+    )
+    self.assertAlmostEqual(float(r_zero), 0.0, places=6)
+    # At phase = 0, left (liftoff) should trail (-d_half) and right (touchdown)
+    # should lead (+d_half); rearward scootering on both feet scores lower.
+    d_half = 0.5 * self.env._kinematic_step_distance
+    centered_pos = jp.array([[0.0, d_half, 0.0], [0.0, -d_half, 0.0]])
+    rearward_pos = jp.array([[0.0, 0.016, 0.0], [0.0, 0.005, 0.0]])
+    r_centered, _ = fwd_reward(
+        centered_pos, zero_v, forward_xy, jp.array(0.0), zero_fv, zero_v
+    )
+    r_rearward, _ = fwd_reward(
+        rearward_pos, zero_v, forward_xy, jp.array(0.0), zero_fv, zero_v
+    )
+    self.assertGreater(float(r_centered), 0.0)
+    self.assertGreater(float(r_centered), float(r_rearward) + 0.5)
+
 
 if __name__ == '__main__':
   absltest.main()

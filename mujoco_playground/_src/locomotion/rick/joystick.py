@@ -90,7 +90,7 @@ def default_config() -> config_dict.ConfigDict:
         # Effective sliding friction between the feet and floor.  Sample one
         # shared value per episode so the policy cannot rely on the nominal
         # XML contact coefficient or on a single floor material.
-        'foot_friction_range': (0.25, 1),
+        'foot_friction_range': (0.18, 0.55),
 
         # Residual whole-robot COM uncertainty (battery_1 is <10% of total mass,
         # so its own offset only shifts whole-robot COM by ~0.4 mm).  Battery
@@ -136,8 +136,9 @@ def default_config() -> config_dict.ConfigDict:
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 3.0,
         'orientation_cost_weight': 5.0,
-        'pose_cost_weight': 1.5,
+        'pose_cost_weight': 2.5,
         'pose_swing_weight': 0.40,
+        'sole_flatness_cost_weight': 4.0,
         'roll_pitch_rate_cost_weight': 0.02,
         'action_rate_cost_weight': 0.03,
         'action_acceleration_cost_weight': 0.01,
@@ -169,8 +170,10 @@ def default_config() -> config_dict.ConfigDict:
         'swing_height_overshoot_tolerance': 0.10,
         'excessive_swing_height_cost_weight': 3.0,
         'excessive_swing_height_threshold': 1.15,
-        'swing_foot_forward_reward_weight': 1.0,
-        'foot_slip_cost_weight': 12.0,
+        'swing_foot_forward_reward_weight': 1.5,
+        'center_foot_placement': True,
+        'foot_slip_cost_weight': 16.0,
+        'slip_cost_includes_transitions': True,
         'energy_cost_weight': 0.005,
 
         # Termination.
@@ -377,6 +380,9 @@ class Joystick(mjx_env.MjxEnv):
         self._pose_swing_weight = float(config.get('pose_swing_weight', 0.25))
         if not 0.0 <= self._pose_swing_weight <= 1.0:
             raise ValueError('pose_swing_weight must be in [0, 1]')
+        self._sole_flatness_cost_weight = float(
+            config.get('sole_flatness_cost_weight', 0.0)
+        )
         self._roll_pitch_rate_cost_weight = (
             config.roll_pitch_rate_cost_weight
         )
@@ -434,7 +440,13 @@ class Joystick(mjx_env.MjxEnv):
         self._swing_foot_forward_reward_weight = (
             config.swing_foot_forward_reward_weight
         )
+        self._center_foot_placement = bool(
+            config.get('center_foot_placement', False)
+        )
         self._foot_slip_cost_weight = config.foot_slip_cost_weight
+        self._slip_cost_includes_transitions = bool(
+            config.get('slip_cost_includes_transitions', False)
+        )
         self._energy_cost_weight = config.energy_cost_weight
 
         self._terminate_when_unhealthy = config.terminate_when_unhealthy
@@ -920,6 +932,7 @@ class Joystick(mjx_env.MjxEnv):
             'cost_heading': zero,
             'cost_orientation': zero,
             'cost_pose': zero,
+            'cost_sole_flatness': zero,
             'cost_roll_pitch_rate': zero,
             'cost_action_rate': zero,
             'cost_action_acceleration': zero,
@@ -1308,6 +1321,9 @@ class Joystick(mjx_env.MjxEnv):
             * jp.sum(jp.square(gravity_local[:2]))
         )
         pose_cost = self._get_pose_cost(data.qpos, phase)
+        sole_flatness_cost = self._get_sole_flatness_cost(
+            data.site_xmat, phase, foot_contacts
+        )
         vertical_velocity_cost = (
             self._vertical_velocity_cost_weight
             * jp.square(velocity_world[2])
@@ -1347,6 +1363,7 @@ class Joystick(mjx_env.MjxEnv):
             - heading_cost
             - tilt_cost
             - pose_cost
+            - sole_flatness_cost
             - roll_pitch_rate_cost
             - action_rate_cost
             - action_acceleration_cost
@@ -1434,6 +1451,7 @@ class Joystick(mjx_env.MjxEnv):
             cost_heading=-heading_cost,
             cost_orientation=-tilt_cost,
             cost_pose=-pose_cost,
+            cost_sole_flatness=-sole_flatness_cost,
             cost_roll_pitch_rate=-roll_pitch_rate_cost,
             cost_action_rate=-action_rate_cost,
             cost_action_acceleration=-action_acceleration_cost,
@@ -1777,7 +1795,12 @@ class Joystick(mjx_env.MjxEnv):
         heel_clearance: jp.ndarray,
     ) -> jp.ndarray:
         """Penalizes stance sliding and mid-swing near-ground scuffing."""
-        contacts = (foot_contacts_before & foot_contacts_after).astype(
+        contact_mask = (
+            (foot_contacts_before | foot_contacts_after)
+            if getattr(self, '_slip_cost_includes_transitions', False)
+            else (foot_contacts_before & foot_contacts_after)
+        )
+        contacts = contact_mask.astype(
             foot_velocities_world.dtype
         )
         tangential_speed_squared = jp.sum(
@@ -1815,6 +1838,26 @@ class Joystick(mjx_env.MjxEnv):
         )
         return self._pose_cost_weight * jp.sum(
             joint_weights * jp.square(joint_error)
+        )
+
+    def _get_sole_flatness_cost(
+        self,
+        site_xmat: jp.ndarray,
+        phase: jp.ndarray,
+        foot_contacts: jp.ndarray,
+    ) -> jp.ndarray:
+        """Penalizes roll and pitch sole tilt so flat soles stay planted."""
+        rotations = site_xmat[self._feet_site_ids].reshape((-1, 3, 3))
+        sole_tilt_squared = jp.sum(jp.square(rotations[:, 2, :2]), axis=1)
+        stance = jp.square(
+            jp.minimum(jp.sin(phase + jp.array([0.0, jp.pi])), 0.0)
+        )
+        support = jp.maximum(
+            stance, foot_contacts.astype(sole_tilt_squared.dtype)
+        )
+        weights = 0.3 + 0.7 * support
+        return getattr(self, '_sole_flatness_cost_weight', 0.0) * jp.sum(
+            weights * sole_tilt_squared
         )
 
     def _body_ipos_with_com_offset(
@@ -2117,10 +2160,27 @@ class Joystick(mjx_env.MjxEnv):
         foot_rel_forward = (
             foot_forward_positions - self._nominal_foot_forward_positions
         )
-        placement_credit = 0.5 * jp.sum(
-            jp.square(jp.cos(foot_phases))
-            * jp.tanh(-jp.cos(foot_phases) * foot_rel_forward / d_half)
-        )
+        if getattr(self, '_center_foot_placement', False):
+            desired_rel_forward = -d_half * jp.cos(foot_phases)
+            placement_scale = jp.maximum(d_half, 0.005)
+            normalized_error = (
+                foot_rel_forward - desired_rel_forward
+            ) / placement_scale
+            baseline_error = -desired_rel_forward / placement_scale
+            placement_score = (
+                jp.exp(-0.5 * jp.square(normalized_error))
+                - 0.15 * jp.square(normalized_error)
+            )
+            baseline_score = (
+                jp.exp(-0.5 * jp.square(baseline_error))
+                - 0.15 * jp.square(baseline_error)
+            )
+            placement_credit = 0.5 * jp.sum(placement_score - baseline_score)
+        else:
+            placement_credit = 0.5 * jp.sum(
+                jp.square(jp.cos(foot_phases))
+                * jp.tanh(-jp.cos(foot_phases) * foot_rel_forward / d_half)
+            )
         reward = self._swing_foot_forward_reward_weight * (
             vel_credit + placement_credit
         )
