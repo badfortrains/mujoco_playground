@@ -794,6 +794,50 @@ class JoystickTest(absltest.TestCase):
     self.assertAlmostEqual(float(cost(right_perturbed, jp.array(jp.pi / 2))), 0.060, places=6)
     self.assertAlmostEqual(float(cost(right_perturbed, jp.array(-jp.pi / 2))), 0.015, places=6)
 
+    self.env._pose_swing_weight = 0.40
+    cost_higher_swing = jax.jit(self.env._get_pose_cost)
+    self.assertAlmostEqual(
+        float(cost_higher_swing(left_perturbed, jp.array(jp.pi / 2))),
+        0.024,
+        places=6,
+    )
+    self.assertAlmostEqual(
+        float(cost_higher_swing(left_perturbed, jp.array(-jp.pi / 2))),
+        0.060,
+        places=6,
+    )
+
+  def test_capped_swing_clearance_reward_stops_above_target_and_keeps_stance_cost(self):
+    self.env._natural_clearance_scale = 0.008
+    self.env._natural_contact_depth = 0.005
+    self.env._foot_phase_reward_weight = 4.0
+    self.env._stance_foot_height_cost_weight = 0.5
+    self.env._swing_sole_tilt_cost_weight = 0.5
+    self.env._contact_phase_cost_weight = 1.0
+    self.env._flight_cost_weight = 1.0
+    self.env._swing_lift_reward_weight = 1.0
+    self.env._swing_airborne_reward_weight = 1.0
+    self.env._swing_height_overshoot_tolerance = 0.10
+    self.env._cap_swing_clearance_reward = True
+    reward = jax.jit(self.env._get_foot_height_rewards)
+
+    c0 = self.env._natural_clearance_scale
+    contacts = jp.array([False, True])
+    at_cap = jp.array([1.10 * c0, 0.0])
+    above_cap = jp.array([2.50 * c0, 0.0])
+    np.testing.assert_allclose(
+        reward(jp.array(jp.pi / 2), contacts, at_cap, at_cap),
+        reward(jp.array(jp.pi / 2), contacts, above_cap, above_cap),
+        atol=1e-6,
+    )
+
+    # Stance foot height cost must remain active when the stance foot lifts.
+    stance_low = jp.array([1.10 * c0, 0.5 * c0])
+    stance_high = jp.array([1.10 * c0, 2.0 * c0])
+    r_low = reward(jp.array(jp.pi / 2), jp.array([False, False]), stance_low, stance_low)[0]
+    r_high = reward(jp.array(jp.pi / 2), jp.array([False, False]), stance_high, stance_high)[0]
+    self.assertLess(float(r_high), float(r_low))
+
 
 if __name__ == '__main__':
   absltest.main()

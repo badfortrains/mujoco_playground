@@ -128,15 +128,16 @@ def default_config() -> config_dict.ConfigDict:
 
         # Task rewards.
         'velocity_tracking_weight': 2.0,
-        'tracking_sigma': 0.0025,
-        'sideways_velocity_cost_weight': 0.02,
+        'tracking_sigma': 0.0006,
+        'sideways_velocity_cost_weight': 0.006,
         'yaw_rate_cost_weight': 0.4,
         # Average a full gait period BEFORE squaring: alternating sway cancels.
-        'cycle_sideways_velocity_cost_weight': 2.0,
+        'cycle_sideways_velocity_cost_weight': 0.5,
         'cycle_yaw_rate_cost_weight': 4.0,
         'heading_cost_weight': 3.0,
         'orientation_cost_weight': 5.0,
         'pose_cost_weight': 1.5,
+        'pose_swing_weight': 0.40,
         'roll_pitch_rate_cost_weight': 0.02,
         'action_rate_cost_weight': 0.03,
         'action_acceleration_cost_weight': 0.01,
@@ -144,29 +145,31 @@ def default_config() -> config_dict.ConfigDict:
         # policy learns to hold or make a change the real servo can execute.
         'servo_deadband_cost_weight': 0.01,
         'healthy_reward': 1.0,
-        'vertical_velocity_cost_weight': 0.02,
+        'vertical_velocity_cost_weight': 0.20,
 
         # Gait shaping weights. Clearance, unloading, step length, and cadence
         # scales are derived automatically from the XML leg length and
         # target_velocity.
-        'foot_phase_reward_weight': 5.0,
+        'clearance_scale_factor': 0.06,
+        'cap_swing_clearance_reward': True,
+        'foot_phase_reward_weight': 4.0,
         'stance_foot_height_cost_weight': 0.5,
         'swing_sole_tilt_cost_weight': 0.5,
         'contact_phase_cost_weight': 1.0,
         'flight_cost_weight': 1.0,
-        'swing_lift_reward_weight': 2.0,
-        'swing_airborne_reward_weight': 2.0,
+        'swing_lift_reward_weight': 1.0,
+        'swing_airborne_reward_weight': 1.0,
         # Track the phase-dependent sole-clearance target without forcing
         # perfectly rigid trajectories.  Undershoot is more costly so the
-        # weaker foot is encouraged to lift; overshoot gets a 25% clearance
+        # weaker foot is encouraged to lift; overshoot gets a 10% clearance
         # margin before it is penalized.  A separate cap catches unusually
         # high steps regardless of where they occur in the swing.
         'swing_height_undershoot_cost_weight': 0.5,
-        'swing_height_overshoot_cost_weight': 0.25,
-        'swing_height_overshoot_tolerance': 0.25,
-        'excessive_swing_height_cost_weight': 1.0,
-        'excessive_swing_height_threshold': 1.25,
-        'swing_foot_forward_reward_weight': 2.0,
+        'swing_height_overshoot_cost_weight': 2.0,
+        'swing_height_overshoot_tolerance': 0.10,
+        'excessive_swing_height_cost_weight': 3.0,
+        'excessive_swing_height_threshold': 1.15,
+        'swing_foot_forward_reward_weight': 1.0,
         'foot_slip_cost_weight': 12.0,
         'energy_cost_weight': 0.005,
 
@@ -371,6 +374,9 @@ class Joystick(mjx_env.MjxEnv):
         ) / self._cycle_samples
         self._orientation_cost_weight = config.orientation_cost_weight
         self._pose_cost_weight = config.get('pose_cost_weight', 0.0)
+        self._pose_swing_weight = float(config.get('pose_swing_weight', 0.25))
+        if not 0.0 <= self._pose_swing_weight <= 1.0:
+            raise ValueError('pose_swing_weight must be in [0, 1]')
         self._roll_pitch_rate_cost_weight = (
             config.roll_pitch_rate_cost_weight
         )
@@ -387,6 +393,14 @@ class Joystick(mjx_env.MjxEnv):
         )
 
         self._foot_phase_reward_weight = config.foot_phase_reward_weight
+        self._cap_swing_clearance_reward = bool(
+            config.get('cap_swing_clearance_reward', False)
+        )
+        self._clearance_scale_factor = float(
+            config.get('clearance_scale_factor', 0.10)
+        )
+        if self._clearance_scale_factor <= 0.0:
+            raise ValueError('clearance_scale_factor must be positive')
         self._auto_step_frequency = bool(
             config.get('auto_step_frequency', True)
         )
@@ -561,7 +575,9 @@ class Joystick(mjx_env.MjxEnv):
             1.5 * (com_z - nominal_foot_z),
             0.05,
         )
-        self._natural_clearance_scale = 0.10 * leg_length
+        self._natural_clearance_scale = (
+            self._clearance_scale_factor * leg_length
+        )
         self._natural_contact_depth = 0.04 * leg_length
         if self._auto_step_frequency:
             self._step_frequency = float(
@@ -1666,12 +1682,23 @@ class Joystick(mjx_env.MjxEnv):
         opposite_contact = contacts[::-1].astype(clearance.dtype)
         contact = contacts.astype(clearance.dtype)
 
+        if getattr(self, '_cap_swing_clearance_reward', False):
+            swing_clearance = jp.minimum(
+                clearance,
+                c0 * (swing + self._swing_height_overshoot_tolerance),
+            )
+        else:
+            swing_clearance = clearance
+
         # C1-continuous transition at liftoff (clearance = 0): linear unloading
         # slope 1/c0 below 0 joins 1 - exp(-clearance / c0) above 0.
         airborne_clearance = 1.0 - jp.exp(-jp.maximum(clearance, 0.0) / c0)
+        swing_airborne_clearance = 1.0 - jp.exp(
+            -jp.maximum(swing_clearance, 0.0) / c0
+        )
         swing_credit = (
             jp.minimum(clearance / c0, 0.0)
-            + airborne_clearance * opposite_contact
+            + swing_airborne_clearance * opposite_contact
         )
         foot_phase_reward = (
             self._foot_phase_reward_weight * jp.sum(swing * swing_credit)
@@ -1688,13 +1715,13 @@ class Joystick(mjx_env.MjxEnv):
         foot_phase_reward -= self._flight_cost_weight * (~jp.any(contacts))
 
         lift_progress = 1.0 - jp.exp(
-            -jp.maximum(clearance + d0, 0.0) / (c0 + d0)
+            -jp.maximum(swing_clearance + d0, 0.0) / (c0 + d0)
         )
         swing_lift_reward = self._swing_lift_reward_weight * jp.sum(
             swing * lift_progress
         )
         swing_airborne_reward = self._swing_airborne_reward_weight * jp.sum(
-            swing * (1.0 - contact) * airborne_clearance
+            swing * (1.0 - contact) * swing_airborne_clearance
         )
         return foot_phase_reward, swing_lift_reward, swing_airborne_reward
 
@@ -1776,7 +1803,8 @@ class Joystick(mjx_env.MjxEnv):
         """Anchors stance joints near the knees-forward keyframe pose."""
         foot_phases = phase + jp.array([0.0, jp.pi])
         stance = jp.square(jp.minimum(jp.sin(foot_phases), 0.0))
-        leg_weights = 0.25 + 0.75 * stance
+        swing_weight = getattr(self, '_pose_swing_weight', 0.25)
+        leg_weights = swing_weight + (1.0 - swing_weight) * stance
         joint_weights = jp.where(
             self._actuator_foot_indices >= 0,
             leg_weights[jp.maximum(self._actuator_foot_indices, 0)],
